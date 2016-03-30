@@ -243,56 +243,6 @@ void FillCPUCaps(ALuint capfilter)
 }
 
 
-void *al_malloc(size_t alignment, size_t size)
-{
-#if defined(HAVE_ALIGNED_ALLOC)
-    size = (size+(alignment-1))&~(alignment-1);
-    return aligned_alloc(alignment, size);
-#elif defined(HAVE_POSIX_MEMALIGN)
-    void *ret;
-    if(posix_memalign(&ret, alignment, size) == 0)
-        return ret;
-    return NULL;
-#elif defined(HAVE__ALIGNED_MALLOC)
-    return _aligned_malloc(size, alignment);
-#else
-    char *ret = malloc(size+alignment);
-    if(ret != NULL)
-    {
-        *(ret++) = 0x00;
-        while(((ptrdiff_t)ret&(alignment-1)) != 0)
-            *(ret++) = 0x55;
-    }
-    return ret;
-#endif
-}
-
-void *al_calloc(size_t alignment, size_t size)
-{
-    void *ret = al_malloc(alignment, size);
-    if(ret) memset(ret, 0, size);
-    return ret;
-}
-
-void al_free(void *ptr)
-{
-#if defined(HAVE_ALIGNED_ALLOC) || defined(HAVE_POSIX_MEMALIGN)
-    free(ptr);
-#elif defined(HAVE__ALIGNED_MALLOC)
-    _aligned_free(ptr);
-#else
-    if(ptr != NULL)
-    {
-        char *finder = ptr;
-        do {
-            --finder;
-        } while(*finder == 0x55);
-        free(finder);
-    }
-#endif
-}
-
-
 void SetMixerFPUMode(FPUCtl *ctl)
 {
 #ifdef HAVE_FENV_H
@@ -363,6 +313,11 @@ void RestoreFPUMode(const FPUCtl *ctl)
 #endif
 }
 
+
+static int StringSortCompare(const void *str1, const void *str2)
+{
+    return al_string_cmp(*(const_al_string*)str1, *(const_al_string*)str2);
+}
 
 #ifdef _WIN32
 
@@ -471,374 +426,69 @@ void al_print(const char *type, const char *func, const char *fmt, ...)
 static inline int is_slash(int c)
 { return (c == '\\' || c == '/'); }
 
-FILE *OpenDataFile(const char *fname, const char *subdir)
+static void DirectorySearch(const char *path, const char *ext, vector_al_string *results)
 {
-    static const int ids[2] = { CSIDL_APPDATA, CSIDL_COMMON_APPDATA };
-    WCHAR *wname=NULL, *wsubdir=NULL;
-    FILE *f;
-    size_t i;
-
-    wname = FromUTF8(fname);
-    if(!wname)
-    {
-        ERR("Failed to convert UTF-8 filename: \"%s\"\n", fname);
-        return NULL;
-    }
-
-    /* If the path is absolute, open it directly. */
-    if(wname[0] != '\0' && wname[1] == ':' && is_slash(wname[2]))
-    {
-        f = _wfopen(wname, L"rb");
-        if(f) TRACE("Opened %s\n", fname);
-        else WARN("Could not open %s\n", fname);
-        free(wname);
-        return f;
-    }
-
-    /* Try the current directory first before the data directories. */
-    if((f=_wfopen(wname, L"rb")) != NULL)
-    {
-        TRACE("Opened %s\n", fname);
-        free(wname);
-        return f;
-    }
-
-    wsubdir = FromUTF8(subdir);
-    if(!wsubdir)
-    {
-        ERR("Failed to convert UTF-8 subdir: \"%s\"\n", subdir);
-        free(wname);
-        return NULL;
-    }
-
-    for(i = 0;i < COUNTOF(ids);i++)
-    {
-        WCHAR buffer[PATH_MAX];
-        size_t len;
-
-        if(SHGetSpecialFolderPathW(NULL, buffer, ids[i], FALSE) == FALSE)
-            continue;
-
-        len = lstrlenW(buffer);
-        if(len > 0 && is_slash(buffer[len-1]))
-            buffer[--len] = '\0';
-        _snwprintf(buffer+len, PATH_MAX-len, L"/%ls/%ls", wsubdir, wname);
-        len = lstrlenW(buffer);
-        while(len > 0)
-        {
-            --len;
-            if(buffer[len] == '/')
-                buffer[len] = '\\';
-        }
-
-        if((f=_wfopen(buffer, L"rb")) != NULL)
-        {
-            al_string filepath = AL_STRING_INIT_STATIC();
-            al_string_copy_wcstr(&filepath, buffer);
-            TRACE("Opened %s\n", al_string_get_cstr(filepath));
-            al_string_deinit(&filepath);
-            break;
-        }
-    }
-    free(wname);
-    free(wsubdir);
-
-    if(f == NULL)
-        WARN("Could not open %s\\%s\n", subdir, fname);
-    return f;
-}
-
-
-static size_t strlenW(const WCHAR *str)
-{
-    const WCHAR *end = str;
-    while(*end) ++end;
-    return end-str;
-}
-
-static const WCHAR *strchrW(const WCHAR *str, WCHAR ch)
-{
-    for(;*str != 0;++str)
-    {
-        if(*str == ch)
-            return str;
-    }
-    return NULL;
-}
-
-static const WCHAR *strrchrW(const WCHAR *str, WCHAR ch)
-{
-    const WCHAR *ret = NULL;
-    for(;*str != 0;++str)
-    {
-        if(*str == ch)
-            ret = str;
-    }
-    return ret;
-}
-
-static const WCHAR *strstrW(const WCHAR *haystack, const WCHAR *needle)
-{
-    size_t len = strlenW(needle);
-    while(*haystack != 0)
-    {
-        if(CompareStringW(GetThreadLocale(), NORM_IGNORECASE,
-                          haystack, len, needle, len) == CSTR_EQUAL)
-            return haystack;
-
-        do {
-            ++haystack;
-        } while(((*haystack)&0xC000) == 0x8000);
-    }
-    return NULL;
-}
-
-
-/* Compares the filename in the find data with the match string. The match
- * string may contain the "%r" marker to signifiy a sample rate (really any
- * positive integer), "%%" to signify a single '%', or "%s" for a (non-greedy)
- * string.
- */
-static int MatchFilter(const WCHAR *match, const WIN32_FIND_DATAW *fdata)
-{
-    const WCHAR *name = fdata->cFileName;
-    int ret = 1;
-
-    do {
-        const WCHAR *p = strchrW(match, '%');
-        if(!p)
-            ret = CompareStringW(GetThreadLocale(), NORM_IGNORECASE,
-                                 match, -1, name, -1) == CSTR_EQUAL;
-        else
-        {
-            int len = p-match;
-            ret = lstrlenW(name) >= len;
-            if(ret)
-                ret = CompareStringW(GetThreadLocale(), NORM_IGNORECASE,
-                                     match, len, name, len) == CSTR_EQUAL;
-            if(ret)
-            {
-                match += len;
-                name += len;
-
-                ++p;
-                if(*p == 'r')
-                {
-                    unsigned long l = 0;
-                    while(*name >= '0' && *name <= '9')
-                    {
-                        l = l*10 + (*name-'0');
-                        ++name;
-                    }
-                    ret = l > 0;
-                    ++p;
-                }
-                else if(*p == 's')
-                {
-                    const WCHAR *next = p+1;
-                    if(*next != '\0' && *next != '%')
-                    {
-                        const WCHAR *next_p = strchrW(next, '%');
-                        const WCHAR *m;
-
-                        if(!next_p)
-                            m = strstrW(name, next);
-                        else
-                        {
-                            WCHAR *tmp = malloc((next_p - next + 1) * 2);
-                            memcpy(tmp, next, (next_p - next) * 2);
-                            tmp[next_p - next] = 0;
-
-                            m = strstrW(name, tmp);
-
-                            free(tmp);
-                        }
-
-                        ret = !!m;
-                        if(ret)
-                        {
-                            size_t l;
-                            if(next_p) l = next_p - next;
-                            else l = strlenW(next);
-
-                            name = m + l;
-                            next += l;
-                        }
-                    }
-                    p = next;
-                }
-            }
-        }
-
-        match = p;
-    } while(ret && match && *match);
-
-    return ret;
-}
-
-static void RecurseDirectorySearch(const char *path, const WCHAR *match, vector_al_string *results)
-{
+    al_string pathstr = AL_STRING_INIT_STATIC();
     WIN32_FIND_DATAW fdata;
-    const WCHAR *sep, *p;
+    WCHAR *wpath;
     HANDLE hdl;
 
-    if(!match[0])
-        return;
+    al_string_copy_cstr(&pathstr, path);
+    al_string_append_cstr(&pathstr, "\\*");
+    al_string_append_cstr(&pathstr, ext);
 
-    /* Find the last directory separator and the next '%' marker in the match
-     * string. */
-    sep = strrchrW(match, '\\');
-    p = strchrW(match, '%');
+    TRACE("Searching %s\n", al_string_get_cstr(pathstr));
 
-    /* If there's no separator, test the files in the specified path against
-     * the match string, and add the results. */
-    if(!sep)
+    wpath = FromUTF8(al_string_get_cstr(pathstr));
+
+    hdl = FindFirstFileW(wpath, &fdata);
+    if(hdl != INVALID_HANDLE_VALUE)
     {
-        al_string pathstr = AL_STRING_INIT_STATIC();
-        WCHAR *wpath;
+        size_t base = VECTOR_SIZE(*results);
+        do {
+            al_string str = AL_STRING_INIT_STATIC();
+            al_string_copy_cstr(&str, path);
+            al_string_append_char(&str, '\\');
+            al_string_append_wcstr(&str, fdata.cFileName);
+            TRACE("Got result %s\n", al_string_get_cstr(str));
+            VECTOR_PUSH_BACK(*results, str);
+        } while(FindNextFileW(hdl, &fdata));
+        FindClose(hdl);
 
-        TRACE("Searching %s for %ls\n", path, match);
-
-        al_string_append_cstr(&pathstr, path);
-        al_string_append_cstr(&pathstr, "\\*.*");
-        wpath = FromUTF8(al_string_get_cstr(pathstr));
-
-        hdl = FindFirstFileW(wpath, &fdata);
-        if(hdl != INVALID_HANDLE_VALUE)
-        {
-            do {
-                if(MatchFilter(match, &fdata))
-                {
-                    al_string str = AL_STRING_INIT_STATIC();
-                    al_string_copy_cstr(&str, path);
-                    al_string_append_char(&str, '\\');
-                    al_string_append_wcstr(&str, fdata.cFileName);
-                    TRACE("Got result %s\n", al_string_get_cstr(str));
-                    VECTOR_PUSH_BACK(*results, str);
-                }
-            } while(FindNextFileW(hdl, &fdata));
-            FindClose(hdl);
-        }
-
-        free(wpath);
-        al_string_deinit(&pathstr);
-
-        return;
+        if(VECTOR_SIZE(*results) > base)
+            qsort(VECTOR_ITER_BEGIN(*results)+base, VECTOR_SIZE(*results)-base,
+                    sizeof(VECTOR_FRONT(*results)), StringSortCompare);
     }
 
-    /* If there's no '%' marker, or it's after the final separator, append the
-     * remaining directories to the path and recurse into it with the remaining
-     * filename portion. */
-    if(!p || p-sep >= 0)
-    {
-        al_string npath = AL_STRING_INIT_STATIC();
-        al_string_append_cstr(&npath, path);
-        al_string_append_char(&npath, '\\');
-        al_string_append_wrange(&npath, match, sep);
-
-        TRACE("Recursing into %s with %ls\n", al_string_get_cstr(npath), sep+1);
-        RecurseDirectorySearch(al_string_get_cstr(npath), sep+1, results);
-
-        al_string_deinit(&npath);
-        return;
-    }
-
-    /* Look for the last separator before the '%' marker, and the first
-     * separator after it. */
-    sep = strchrW(match, '\\');
-    if(sep-p >= 0) sep = NULL;
-    for(;;)
-    {
-        const WCHAR *next = strchrW(sep?sep+1:match, '\\');
-        if(next-p < 0)
-        {
-            al_string npath = AL_STRING_INIT_STATIC();
-            WCHAR *nwpath, *nwmatch;
-
-            /* Append up to the last directory before the one with a '%'. */
-            al_string_copy_cstr(&npath, path);
-            if(sep)
-            {
-                al_string_append_char(&npath, '\\');
-                al_string_append_wrange(&npath, match, sep);
-            }
-            al_string_append_cstr(&npath, "\\*.*");
-            nwpath = FromUTF8(al_string_get_cstr(npath));
-
-            /* Take the directory name containing a '%' as a new string to
-             * match against. */
-            if(!sep)
-            {
-                nwmatch = calloc(2, next-match+1);
-                memcpy(nwmatch, match, (next-match)*2);
-            }
-            else
-            {
-                nwmatch = calloc(2, next-(sep+1)+1);
-                memcpy(nwmatch, sep+1, (next-(sep+1))*2);
-            }
-
-            /* For each matching directory name, recurse into it with the
-             * remaining string. */
-            TRACE("Searching %s for %ls\n", al_string_get_cstr(npath), nwmatch);
-            hdl = FindFirstFileW(nwpath, &fdata);
-            if(hdl != INVALID_HANDLE_VALUE)
-            {
-                do {
-                    if(MatchFilter(nwmatch, &fdata))
-                    {
-                        al_string ndir = AL_STRING_INIT_STATIC();
-                        al_string_copy(&ndir, npath);
-                        al_string_append_char(&ndir, '\\');
-                        al_string_append_wcstr(&ndir, fdata.cFileName);
-                        TRACE("Recursing %s with %ls\n", al_string_get_cstr(ndir), next+1);
-                        RecurseDirectorySearch(al_string_get_cstr(ndir), next+1, results);
-                        al_string_deinit(&ndir);
-                    }
-                } while(FindNextFileW(hdl, &fdata));
-                FindClose(hdl);
-            }
-
-            free(nwmatch);
-            free(nwpath);
-            al_string_deinit(&npath);
-            break;
-        }
-        sep = next;
-    }
+    free(wpath);
+    al_string_deinit(&pathstr);
 }
 
-vector_al_string SearchDataFiles(const char *match, const char *subdir)
+vector_al_string SearchDataFiles(const char *ext, const char *subdir)
 {
     static const int ids[2] = { CSIDL_APPDATA, CSIDL_COMMON_APPDATA };
     static RefCount search_lock;
     vector_al_string results = VECTOR_INIT_STATIC();
-    WCHAR *wmatch;
     size_t i;
 
     while(ATOMIC_EXCHANGE(uint, &search_lock, 1) == 1)
         althrd_yield();
 
-    wmatch = FromUTF8(match);
-    if(!wmatch)
-    {
-        ERR("Failed to convert UTF-8 filename: \"%s\"\n", match);
-        return results;
-    }
-    for(i = 0;wmatch[i];++i)
-    {
-        if(wmatch[i] == '/')
-            wmatch[i] = '\\';
-    }
-
     /* If the path is absolute, use it directly. */
-    if(isalpha(wmatch[0]) && wmatch[1] == ':' && is_slash(wmatch[2]))
+    if(isalpha(subdir[0]) && subdir[1] == ':' && is_slash(subdir[2]))
     {
-        char drv[3] = { (char)wmatch[0], ':', 0 };
-        RecurseDirectorySearch(drv, wmatch+3, &results);
+        al_string path = AL_STRING_INIT_STATIC();
+        al_string_copy_cstr(&path, subdir);
+#define FIX_SLASH(i) do { if(*(i) == '/') *(i) = '\\'; } while(0)
+        VECTOR_FOR_EACH(char, path, FIX_SLASH);
+#undef FIX_SLASH
+
+        DirectorySearch(al_string_get_cstr(path), ext, &results);
+
+        al_string_deinit(&path);
     }
-    else if(wmatch[0] == '\\' && wmatch[1] == '\\' && wmatch[2] == '?' && wmatch[3] == '\\')
-        RecurseDirectorySearch("\\\\?", wmatch+4, &results);
+    else if(subdir[0] == '\\' && subdir[1] == '\\' && subdir[2] == '?' && subdir[3] == '\\')
+        DirectorySearch(subdir, ext, &results);
     else
     {
         al_string path = AL_STRING_INIT_STATIC();
@@ -869,7 +519,7 @@ vector_al_string SearchDataFiles(const char *match, const char *subdir)
 #define FIX_SLASH(i) do { if(*(i) == '/') *(i) = '\\'; } while(0)
         VECTOR_FOR_EACH(char, path, FIX_SLASH);
 #undef FIX_SLASH
-        RecurseDirectorySearch(al_string_get_cstr(path), wmatch, &results);
+        DirectorySearch(al_string_get_cstr(path), ext, &results);
 
         /* Search the local and global data dirs. */
         for(i = 0;i < COUNTOF(ids);i++)
@@ -885,14 +535,13 @@ vector_al_string SearchDataFiles(const char *match, const char *subdir)
                 VECTOR_FOR_EACH(char, path, FIX_SLASH);
 #undef FIX_SLASH
 
-                RecurseDirectorySearch(al_string_get_cstr(path), wmatch, &results);
+                DirectorySearch(al_string_get_cstr(path), ext, &results);
             }
         }
 
         al_string_deinit(&path);
     }
 
-    free(wmatch);
     ATOMIC_STORE(&search_lock, 0);
 
     return results;
@@ -945,250 +594,46 @@ void al_print(const char *type, const char *func, const char *fmt, ...)
 }
 
 
-FILE *OpenDataFile(const char *fname, const char *subdir)
+static void DirectorySearch(const char *path, const char *ext, vector_al_string *results)
 {
-    char buffer[PATH_MAX] = "";
-    const char *str, *next;
-    FILE *f;
+    size_t extlen = strlen(ext);
+    DIR *dir;
 
-    if(fname[0] == '/')
+    TRACE("Searching %s for *%s\n", path, ext);
+    dir = opendir(path);
+    if(dir != NULL)
     {
-        if((f=al_fopen(fname, "rb")) != NULL)
+        size_t base = VECTOR_SIZE(*results);
+        struct dirent *dirent;
+        while((dirent=readdir(dir)) != NULL)
         {
-            TRACE("Opened %s\n", fname);
-            return f;
+            al_string str;
+            size_t len;
+            if(strcmp(dirent->d_name, ".") == 0 || strcmp(dirent->d_name, "..") == 0)
+                continue;
+
+            len = strlen(dirent->d_name);
+            if(!(len > extlen))
+                continue;
+            if(strcasecmp(dirent->d_name+len-extlen, ext) != 0)
+                continue;
+
+            AL_STRING_INIT(str);
+            al_string_copy_cstr(&str, path);
+            al_string_append_char(&str, '/');
+            al_string_append_cstr(&str, dirent->d_name);
+            TRACE("Got result %s\n", al_string_get_cstr(str));
+            VECTOR_PUSH_BACK(*results, str);
         }
-        WARN("Could not open %s\n", fname);
-        return NULL;
-    }
+        closedir(dir);
 
-    if((f=al_fopen(fname, "rb")) != NULL)
-    {
-        TRACE("Opened %s\n", fname);
-        return f;
-    }
-
-    if((str=getenv("XDG_DATA_HOME")) != NULL && str[0] != '\0')
-        snprintf(buffer, sizeof(buffer), "%s/%s/%s", str, subdir, fname);
-    else if((str=getenv("HOME")) != NULL && str[0] != '\0')
-        snprintf(buffer, sizeof(buffer), "%s/.local/share/%s/%s", str, subdir, fname);
-    if(buffer[0])
-    {
-        if((f=al_fopen(buffer, "rb")) != NULL)
-        {
-            TRACE("Opened %s\n", buffer);
-            return f;
-        }
-    }
-
-    if((str=getenv("XDG_DATA_DIRS")) == NULL || str[0] == '\0')
-        str = "/usr/local/share/:/usr/share/";
-
-    next = str;
-    while((str=next) != NULL && str[0] != '\0')
-    {
-        size_t len;
-        next = strchr(str, ':');
-
-        if(!next)
-            len = strlen(str);
-        else
-        {
-            len = next - str;
-            next++;
-        }
-
-        if(len > sizeof(buffer)-1)
-            len = sizeof(buffer)-1;
-        strncpy(buffer, str, len);
-        buffer[len] = '\0';
-        snprintf(buffer+len, sizeof(buffer)-len, "/%s/%s", subdir, fname);
-
-        if((f=al_fopen(buffer, "rb")) != NULL)
-        {
-            TRACE("Opened %s\n", buffer);
-            return f;
-        }
-    }
-    WARN("Could not open %s/%s\n", subdir, fname);
-
-    return NULL;
-}
-
-
-static const char *MatchString;
-static int MatchFilter(const struct dirent *dir)
-{
-    const char *match = MatchString;
-    const char *name = dir->d_name;
-    int ret = 1;
-
-    do {
-        const char *p = strchr(match, '%');
-        if(!p)
-            ret = strcmp(match, name) == 0;
-        else
-        {
-            size_t len = p-match;
-            ret = strncmp(match, name, len) == 0;
-            if(ret)
-            {
-                match += len;
-                name += len;
-
-                ++p;
-                if(*p == 'r')
-                {
-                    char *end;
-                    ret = strtoul(name, &end, 10) > 0;
-                    if(ret) name = end;
-                    ++p;
-                }
-                else if(*p == 's')
-                {
-                    const char *next = p+1;
-                    if(*next != '\0' && *next != '%')
-                    {
-                        const char *next_p = strchr(next, '%');
-                        const char *m;
-
-                        if(!next_p)
-                            m = strstr(name, next);
-                        else
-                        {
-                            char *tmp = malloc(next_p - next + 1);
-                            memcpy(tmp, next, next_p - next);
-                            tmp[next_p - next] = 0;
-
-                            m = strstr(name, tmp);
-
-                            free(tmp);
-                        }
-
-                        ret = !!m;
-                        if(ret)
-                        {
-                            size_t l;
-                            if(next_p) l = next_p - next;
-                            else l = strlen(next);
-
-                            name = m + l;
-                            next += l;
-                        }
-                    }
-                    p = next;
-                }
-            }
-        }
-
-        match = p;
-    } while(ret && match && *match);
-
-    return ret;
-}
-
-static void RecurseDirectorySearch(const char *path, const char *match, vector_al_string *results)
-{
-    struct dirent **namelist;
-    char *sep, *p;
-    int n, i;
-
-    if(!match[0])
-        return;
-
-    sep = strrchr(match, '/');
-    p = strchr(match, '%');
-
-    if(!sep)
-    {
-        MatchString = match;
-        TRACE("Searching %s for %s\n", path?path:"/", match);
-        n = scandir(path?path:"/", &namelist, MatchFilter, alphasort);
-        if(n >= 0)
-        {
-            for(i = 0;i < n;++i)
-            {
-                al_string str = AL_STRING_INIT_STATIC();
-                if(path) al_string_copy_cstr(&str, path);
-                al_string_append_char(&str, '/');
-                al_string_append_cstr(&str, namelist[i]->d_name);
-                TRACE("Got result %s\n", al_string_get_cstr(str));
-                VECTOR_PUSH_BACK(*results, str);
-                free(namelist[i]);
-            }
-            free(namelist);
-        }
-
-        return;
-    }
-
-    if(!p || p-sep >= 0)
-    {
-        al_string npath = AL_STRING_INIT_STATIC();
-        if(path) al_string_append_cstr(&npath, path);
-        al_string_append_char(&npath, '/');
-        al_string_append_range(&npath, match, sep);
-
-        TRACE("Recursing into %s with %s\n", al_string_get_cstr(npath), sep+1);
-        RecurseDirectorySearch(al_string_get_cstr(npath), sep+1, results);
-
-        al_string_deinit(&npath);
-        return;
-    }
-
-    sep = strchr(match, '/');
-    if(sep-p >= 0) sep = NULL;
-    for(;;)
-    {
-        char *next = strchr(sep?sep+1:match, '/');
-        if(next-p < 0)
-        {
-            al_string npath = AL_STRING_INIT_STATIC();
-            al_string nmatch = AL_STRING_INIT_STATIC();
-
-            if(!sep)
-            {
-                al_string_append_cstr(&npath, path?path:"/.");
-                MatchString = match;
-            }
-            else
-            {
-                if(path) al_string_append_cstr(&npath, path);
-                al_string_append_char(&npath, '/');
-                al_string_append_range(&npath, match, sep);
-
-                al_string_append_range(&nmatch, sep+1, next);
-                MatchString = al_string_get_cstr(nmatch);
-            }
-
-            TRACE("Searching %s for %s\n", al_string_get_cstr(npath), MatchString);
-            n = scandir(al_string_get_cstr(npath), &namelist, MatchFilter, alphasort);
-            if(n >= 0)
-            {
-                al_string ndir = AL_STRING_INIT_STATIC();
-                for(i = 0;i < n;++i)
-                {
-                    al_string_copy(&ndir, npath);
-                    al_string_append_char(&ndir, '/');
-                    al_string_append_cstr(&ndir, namelist[i]->d_name);
-                    free(namelist[i]);
-                    TRACE("Recursing %s with %s\n", al_string_get_cstr(ndir), next+1);
-                    RecurseDirectorySearch(al_string_get_cstr(ndir), next+1, results);
-                }
-                al_string_deinit(&ndir);
-                free(namelist);
-            }
-
-            al_string_deinit(&nmatch);
-            al_string_deinit(&npath);
-            break;
-        }
-
-        sep = next;
+        if(VECTOR_SIZE(*results) > base)
+            qsort(VECTOR_ITER_BEGIN(*results)+base, VECTOR_SIZE(*results)-base,
+                    sizeof(VECTOR_FRONT(*results)), StringSortCompare);
     }
 }
 
-vector_al_string SearchDataFiles(const char *match, const char *subdir)
+vector_al_string SearchDataFiles(const char *ext, const char *subdir)
 {
     static RefCount search_lock;
     vector_al_string results = VECTOR_INIT_STATIC();
@@ -1196,8 +641,8 @@ vector_al_string SearchDataFiles(const char *match, const char *subdir)
     while(ATOMIC_EXCHANGE(uint, &search_lock, 1) == 1)
         althrd_yield();
 
-    if(match[0] == '/')
-        RecurseDirectorySearch(NULL, match+1, &results);
+    if(subdir[0] == '/')
+        DirectorySearch(subdir, ext, &results);
     else
     {
         al_string path = AL_STRING_INIT_STATIC();
@@ -1206,29 +651,27 @@ vector_al_string SearchDataFiles(const char *match, const char *subdir)
 
         /* Search the app-local directory. */
         if((str=getenv("ALSOFT_LOCAL_PATH")) && *str != '\0')
-        {
-            strncpy(cwdbuf, str, sizeof(cwdbuf)-1);
-            cwdbuf[sizeof(cwdbuf)-1] = '\0';
-        }
-        else if(!getcwd(cwdbuf, sizeof(cwdbuf)))
-            strcpy(cwdbuf, ".");
-        RecurseDirectorySearch(cwdbuf, match, &results);
+            DirectorySearch(str, ext, &results);
+        else if(getcwd(cwdbuf, sizeof(cwdbuf)))
+            DirectorySearch(cwdbuf, ext, &results);
+        else
+            DirectorySearch(".", ext, &results);
 
         // Search local data dir
         if((str=getenv("XDG_DATA_HOME")) != NULL && str[0] != '\0')
         {
-            al_string_append_cstr(&path, str);
+            al_string_copy_cstr(&path, str);
             al_string_append_char(&path, '/');
             al_string_append_cstr(&path, subdir);
+            DirectorySearch(al_string_get_cstr(path), ext, &results);
         }
         else if((str=getenv("HOME")) != NULL && str[0] != '\0')
         {
-            al_string_append_cstr(&path, str);
+            al_string_copy_cstr(&path, str);
             al_string_append_cstr(&path, "/.local/share/");
             al_string_append_cstr(&path, subdir);
+            DirectorySearch(al_string_get_cstr(path), ext, &results);
         }
-        if(!al_string_empty(path))
-            RecurseDirectorySearch(al_string_get_cstr(path), match, &results);
 
         // Search global data dirs
         if((str=getenv("XDG_DATA_DIRS")) == NULL || str[0] == '\0')
@@ -1242,8 +685,7 @@ vector_al_string SearchDataFiles(const char *match, const char *subdir)
                 al_string_copy_cstr(&path, str);
             else
             {
-                al_string_clear(&path);
-                al_string_append_range(&path, str, next);
+                al_string_copy_range(&path, str, next);
                 ++next;
             }
             if(!al_string_empty(path))
@@ -1251,7 +693,7 @@ vector_al_string SearchDataFiles(const char *match, const char *subdir)
                 al_string_append_char(&path, '/');
                 al_string_append_cstr(&path, subdir);
 
-                RecurseDirectorySearch(al_string_get_cstr(path), match, &results);
+                DirectorySearch(al_string_get_cstr(path), ext, &results);
             }
         }
 
@@ -1368,12 +810,16 @@ extern inline const al_string_char_type *al_string_get_cstr(const_al_string str)
 
 void al_string_clear(al_string *str)
 {
-    /* Reserve one more character than the total size of the string. This is to
-     * ensure we have space to add a null terminator in the string data so it
-     * can be used as a C-style string. */
-    VECTOR_RESERVE(*str, 1);
-    VECTOR_RESIZE(*str, 0);
-    *VECTOR_ITER_END(*str) = 0;
+    if(!al_string_empty(*str))
+    {
+        /* Reserve one more character than the total size of the string. This
+         * is to ensure we have space to add a null terminator in the string
+         * data so it can be used as a C-style string.
+         */
+        VECTOR_RESERVE(*str, 1);
+        VECTOR_RESIZE(*str, 0);
+        *VECTOR_ITER_END(*str) = 0;
+    }
 }
 
 static inline int al_string_compare(const al_string_char_type *str1, size_t str1len,
@@ -1414,6 +860,15 @@ void al_string_copy_cstr(al_string *str, const al_string_char_type *from)
     VECTOR_RESERVE(*str, len+1);
     VECTOR_RESIZE(*str, 0);
     VECTOR_INSERT(*str, VECTOR_ITER_END(*str), from, from+len);
+    *VECTOR_ITER_END(*str) = 0;
+}
+
+void al_string_copy_range(al_string *str, const al_string_char_type *from, const al_string_char_type *to)
+{
+    size_t len = to - from;
+    VECTOR_RESERVE(*str, len+1);
+    VECTOR_RESIZE(*str, 0);
+    VECTOR_INSERT(*str, VECTOR_ITER_END(*str), from, to);
     *VECTOR_ITER_END(*str) = 0;
 }
 

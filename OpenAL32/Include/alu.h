@@ -13,6 +13,7 @@
 #include "alMain.h"
 #include "alBuffer.h"
 #include "alFilter.h"
+#include "alAuxEffectSlot.h"
 
 #include "hrtf.h"
 #include "align.h"
@@ -34,6 +35,7 @@ extern "C" {
 
 struct ALsource;
 struct ALvoice;
+struct ALeffectslot;
 
 
 /* The number of distinct scale and phase intervals within the filter table. */
@@ -136,19 +138,19 @@ typedef struct MixGains {
     ALfloat Target;
 } MixGains;
 
+typedef struct MixHrtfParams {
+    const HrtfParams *Target;
+    HrtfParams *Current;
+    struct {
+        alignas(16) ALfloat Coeffs[HRIR_LENGTH][2];
+        ALint Delay[2];
+    } Steps;
+} MixHrtfParams;
 
 typedef struct DirectParams {
     ALfloat (*OutBuffer)[BUFFERSIZE];
     ALuint OutChannels;
 
-    /* If not 'moving', gain/coefficients are set directly without fading. */
-    ALboolean Moving;
-    /* Stepping counter for gain/coefficient fading. */
-    ALuint Counter;
-    /* Last direction (relative to listener) and gain of a moving source. */
-    aluVector LastDir;
-    ALfloat LastGain;
-
     struct {
         enum ActiveFilters ActiveType;
         ALfilterState LowPass;
@@ -156,17 +158,20 @@ typedef struct DirectParams {
     } Filters[MAX_INPUT_CHANNELS];
 
     struct {
-        HrtfParams Params;
+        HrtfParams Current;
+        HrtfParams Target;
         HrtfState State;
     } Hrtf[MAX_INPUT_CHANNELS];
-    MixGains Gains[MAX_INPUT_CHANNELS][MAX_OUTPUT_CHANNELS];
+
+    struct {
+        ALfloat Current[MAX_OUTPUT_CHANNELS];
+        ALfloat Target[MAX_OUTPUT_CHANNELS];
+    } Gains[MAX_INPUT_CHANNELS];
 } DirectParams;
 
 typedef struct SendParams {
     ALfloat (*OutBuffer)[BUFFERSIZE];
-
-    ALboolean Moving;
-    ALuint Counter;
+    ALuint OutChannels;
 
     struct {
         enum ActiveFilters ActiveType;
@@ -174,9 +179,10 @@ typedef struct SendParams {
         ALfilterState HighPass;
     } Filters[MAX_INPUT_CHANNELS];
 
-    /* Gain control, which applies to each input channel to a single (mono)
-     * output buffer. */
-    MixGains Gains[MAX_INPUT_CHANNELS];
+    struct {
+        ALfloat Current[MAX_OUTPUT_CHANNELS];
+        ALfloat Target[MAX_OUTPUT_CHANNELS];
+    } Gains[MAX_INPUT_CHANNELS];
 } SendParams;
 
 
@@ -187,9 +193,9 @@ typedef const ALfloat* (*ResamplerFunc)(const BsincState *state,
 typedef void (*MixerFunc)(const ALfloat *data, ALuint OutChans,
                           ALfloat (*restrict OutBuffer)[BUFFERSIZE], struct MixGains *Gains,
                           ALuint Counter, ALuint OutPos, ALuint BufferSize);
-typedef void (*HrtfMixerFunc)(ALfloat (*restrict OutBuffer)[BUFFERSIZE], const ALfloat *data,
-                              ALuint Counter, ALuint Offset, ALuint OutPos,
-                              const ALuint IrSize, const HrtfParams *hrtfparams,
+typedef void (*HrtfMixerFunc)(ALfloat (*restrict OutBuffer)[BUFFERSIZE], ALuint lidx, ALuint ridx,
+                              const ALfloat *data, ALuint Counter, ALuint Offset, ALuint OutPos,
+                              const ALuint IrSize, const MixHrtfParams *hrtfparams,
                               HrtfState *hrtfstate, ALuint BufferSize);
 
 
@@ -276,37 +282,59 @@ void aluInitMixer(void);
 
 ALvoid aluInitPanning(ALCdevice *Device);
 
-/**
- * ComputeDirectionalGains
- *
- * Sets channel gains based on a direction. The direction must be a 3-component
- * vector no longer than 1 unit.
- */
-void ComputeDirectionalGains(const ALCdevice *device, const ALfloat dir[3], ALfloat ingain, ALfloat gains[MAX_OUTPUT_CHANNELS]);
+void aluInitEffectPanning(struct ALeffectslot *slot);
 
 /**
- * ComputeAngleGains
+ * CalcDirectionCoeffs
  *
- * Sets channel gains based on angle and elevation. The angle and elevation
- * parameters are in radians, going right and up respectively.
+ * Calculates ambisonic coefficients based on a direction vector. The vector
+ * must not be longer than 1 unit.
  */
-void ComputeAngleGains(const ALCdevice *device, ALfloat angle, ALfloat elevation, ALfloat ingain, ALfloat gains[MAX_OUTPUT_CHANNELS]);
+void CalcDirectionCoeffs(const ALfloat dir[3], ALfloat coeffs[MAX_AMBI_COEFFS]);
+
+/**
+ * CalcXYZCoeffs
+ *
+ * Same as CalcDirectionCoeffs except the direction is specified as separate x,
+ * y, and z parameters instead of an array.
+ */
+inline void CalcXYZCoeffs(ALfloat x, ALfloat y, ALfloat z, ALfloat coeffs[MAX_AMBI_COEFFS])
+{
+    ALfloat dir[3] = { x, y, z };
+    CalcDirectionCoeffs(dir, coeffs);
+}
+
+/**
+ * CalcAngleCoeffs
+ *
+ * Calculates ambisonic coefficients based on angle and elevation. The angle
+ * and elevation parameters are in radians, going right and up respectively.
+ */
+void CalcAngleCoeffs(ALfloat angle, ALfloat elevation, ALfloat coeffs[MAX_AMBI_COEFFS]);
 
 /**
  * ComputeAmbientGains
  *
- * Sets channel gains for ambient, omni-directional sounds.
+ * Computes channel gains for ambient, omni-directional sounds.
  */
-void ComputeAmbientGains(const ALCdevice *device, ALfloat ingain, ALfloat gains[MAX_OUTPUT_CHANNELS]);
+void ComputeAmbientGains(const ChannelConfig *chancoeffs, ALuint numchans, ALfloat ingain, ALfloat gains[MAX_OUTPUT_CHANNELS]);
 
 /**
- * ComputeBFormatGains
+ * ComputePanningGains
  *
- * Sets channel gains for a given (first-order) B-Format channel. The matrix is
- * a 1x4 'slice' of the rotation matrix for a given channel used to orient the
- * coefficients.
+ * Computes panning gains using the given channel decoder coefficients and the
+ * pre-calculated direction or angle coefficients.
  */
-void ComputeBFormatGains(const ALCdevice *device, const ALfloat mtx[4], ALfloat ingain, ALfloat gains[MAX_OUTPUT_CHANNELS]);
+void ComputePanningGains(const ChannelConfig *chancoeffs, ALuint numchans, const ALfloat coeffs[MAX_AMBI_COEFFS], ALfloat ingain, ALfloat gains[MAX_OUTPUT_CHANNELS]);
+
+/**
+ * ComputeFirstOrderGains
+ *
+ * Sets channel gains for a first-order ambisonics input channel. The matrix is
+ * a 1x4 'slice' of a transform matrix for the input channel, used to scale and
+ * orient the sound samples.
+ */
+void ComputeFirstOrderGains(const ChannelConfig *chancoeffs, ALuint numchans, const ALfloat mtx[4], ALfloat ingain, ALfloat gains[MAX_OUTPUT_CHANNELS]);
 
 
 ALvoid UpdateContextSources(ALCcontext *context);

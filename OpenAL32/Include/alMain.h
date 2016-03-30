@@ -36,6 +36,7 @@
 #include "uintmap.h"
 #include "vector.h"
 #include "alstring.h"
+#include "almalloc.h"
 
 #include "hrtf.h"
 
@@ -317,10 +318,24 @@ enum Channel {
     SideLeft,
     SideRight,
 
-    BFormatW,
-    BFormatX,
-    BFormatY,
-    BFormatZ,
+    UpperFrontLeft,
+    UpperFrontRight,
+    UpperBackLeft,
+    UpperBackRight,
+    LowerFrontLeft,
+    LowerFrontRight,
+    LowerBackLeft,
+    LowerBackRight,
+
+    Aux0,
+    Aux1,
+    Aux2,
+    Aux3,
+    Aux4,
+    Aux5,
+    Aux6,
+    Aux7,
+    Aux8,
 
     InvalidChannel
 };
@@ -353,7 +368,7 @@ enum DevFmtChannels {
 
     DevFmtChannelsDefault = DevFmtStereo
 };
-#define MAX_OUTPUT_CHANNELS  (8)
+#define MAX_OUTPUT_CHANNELS  (9)
 
 ALuint BytesFromDevFmt(enum DevFmtType type) DECL_CONST;
 ALuint ChannelsFromDevFmt(enum DevFmtChannels chans) DECL_CONST;
@@ -378,17 +393,18 @@ enum DeviceType {
 };
 
 
-enum HrtfMode {
-    DisabledHrtf,
-    BasicHrtf,
-    FullHrtf
+enum RenderMode {
+    NormalRender,
+    StereoPair,
+    HrtfRender
 };
 
 
 /* The maximum number of Ambisonics coefficients. For a given order (o), the
  * size needed will be (o+1)**2, thus zero-order has 1, first-order has 4,
  * second-order has 9, and third-order has 16. */
-#define MAX_AMBI_COEFFS 16
+#define MAX_AMBI_ORDER  3
+#define MAX_AMBI_COEFFS ((MAX_AMBI_ORDER+1) * (MAX_AMBI_ORDER+1))
 
 typedef ALfloat ChannelConfig[MAX_AMBI_COEFFS];
 
@@ -404,9 +420,7 @@ typedef struct HrtfState {
 
 typedef struct HrtfParams {
     alignas(16) ALfloat Coeffs[HRIR_LENGTH][2];
-    alignas(16) ALfloat CoeffStep[HRIR_LENGTH][2];
     ALuint Delay[2];
-    ALint DelayStep[2];
 } HrtfParams;
 
 
@@ -424,25 +438,25 @@ struct ALCdevice_struct
     ALCboolean Connected;
     enum DeviceType Type;
 
-    ALuint       Frequency;
-    ALuint       UpdateSize;
-    ALuint       NumUpdates;
+    ALuint Frequency;
+    ALuint UpdateSize;
+    ALuint NumUpdates;
     enum DevFmtChannels FmtChans;
     enum DevFmtType     FmtType;
-    ALboolean    IsHeadphones;
+    ALboolean IsHeadphones;
 
     al_string DeviceName;
 
     ATOMIC(ALCenum) LastError;
 
     // Maximum number of sources that can be created
-    ALuint       MaxNoOfSources;
+    ALuint MaxNoOfSources;
     // Maximum number of slots that can be created
-    ALuint       AuxiliaryEffectSlotMax;
+    ALuint AuxiliaryEffectSlotMax;
 
-    ALCuint      NumMonoSources;
-    ALCuint      NumStereoSources;
-    ALuint       NumAuxSends;
+    ALCuint NumMonoSources;
+    ALCuint NumStereoSources;
+    ALuint  NumAuxSends;
 
     // Map of Buffers for this device
     UIntMap BufferMap;
@@ -458,21 +472,24 @@ struct ALCdevice_struct
     al_string Hrtf_Name;
     const struct Hrtf *Hrtf;
     ALCenum Hrtf_Status;
-    enum HrtfMode Hrtf_Mode;
     HrtfState Hrtf_State[MAX_OUTPUT_CHANNELS];
     HrtfParams Hrtf_Params[MAX_OUTPUT_CHANNELS];
     ALuint Hrtf_Offset;
 
+    /* UHJ encoder state */
+    struct Uhj2Encoder *Uhj_Encoder;
+
     // Stereo-to-binaural filter
     struct bs2b *Bs2b;
 
+    /* High quality Ambisonic decoder */
+    struct BFormatDec *AmbiDecoder;
+
+    /* Rendering mode. */
+    enum RenderMode Render_Mode;
+
     // Device flags
     ALuint Flags;
-
-    enum Channel ChannelName[MAX_OUTPUT_CHANNELS];
-    ChannelConfig AmbiCoeffs[MAX_OUTPUT_CHANNELS];
-    ALfloat AmbiScale; /* Scale for first-order XYZ inputs using AmbCoeffs. */
-    ALuint NumChannels;
 
     ALuint64 ClockBase;
     ALuint SamplesDone;
@@ -482,8 +499,39 @@ struct ALCdevice_struct
     alignas(16) ALfloat ResampledData[BUFFERSIZE];
     alignas(16) ALfloat FilteredData[BUFFERSIZE];
 
-    /* Dry path buffer mix. */
-    alignas(16) ALfloat (*DryBuffer)[BUFFERSIZE];
+    /* The "dry" path corresponds to the main output. */
+    struct {
+        /* Channel names for the dry buffer mix. */
+        enum Channel ChannelName[MAX_OUTPUT_CHANNELS];
+        /* Ambisonic coefficients for mixing to the dry buffer. */
+        ChannelConfig AmbiCoeffs[MAX_OUTPUT_CHANNELS];
+
+        /* Dry buffer will be aliased by the virtual or real output. */
+        ALfloat (*Buffer)[BUFFERSIZE];
+        ALuint NumChannels;
+    } Dry;
+
+    /* First-order ambisonics output, to be upsampled to the dry buffer if different. */
+    struct {
+        /* Ambisonic coefficients for mixing. */
+        ChannelConfig AmbiCoeffs[MAX_OUTPUT_CHANNELS];
+
+        ALfloat (*Buffer)[BUFFERSIZE];
+        ALuint NumChannels;
+    } FOAOut;
+
+    /* Virtual output, to be post-processed to the real output. */
+    struct {
+        ALfloat (*Buffer)[BUFFERSIZE];
+        ALuint NumChannels;
+    } VirtOut;
+    /* "Real" output, which will be written to the device buffer. */
+    struct {
+        enum Channel ChannelName[MAX_OUTPUT_CHANNELS];
+
+        ALfloat (*Buffer)[BUFFERSIZE];
+        ALuint NumChannels;
+    } RealOut;
 
     /* Running count of the mixer invocations, in 31.1 fixed point. This
      * actually increments *twice* when mixing, first at the start and then at
@@ -590,11 +638,6 @@ inline void UnlockContext(ALCcontext *context)
 { ALCdevice_Unlock(context->Device); }
 
 
-void *al_malloc(size_t alignment, size_t size);
-void *al_calloc(size_t alignment, size_t size);
-void al_free(void *ptr);
-
-
 typedef struct {
 #ifdef HAVE_FENV_H
     DERIVE_FROM_TYPE(fenv_t);
@@ -608,13 +651,6 @@ typedef struct {
 void SetMixerFPUMode(FPUCtl *ctl);
 void RestoreFPUMode(const FPUCtl *ctl);
 
-
-typedef struct RingBuffer RingBuffer;
-RingBuffer *CreateRingBuffer(ALsizei frame_size, ALsizei length);
-void DestroyRingBuffer(RingBuffer *ring);
-ALsizei RingBufferSize(RingBuffer *ring);
-void WriteRingBuffer(RingBuffer *ring, const ALubyte *data, ALsizei len);
-void ReadRingBuffer(RingBuffer *ring, ALubyte *data, ALsizei len);
 
 typedef struct ll_ringbuffer ll_ringbuffer_t;
 typedef struct ll_ringbuffer_data {
@@ -657,20 +693,20 @@ const ALCchar *DevFmtChannelsString(enum DevFmtChannels chans) DECL_CONST;
 /**
  * GetChannelIdxByName
  *
- * Returns the device's channel index given a channel name (e.g. FrontCenter),
- * or -1 if it doesn't exist.
+ * Returns the index for the given channel name (e.g. FrontCenter), or -1 if it
+ * doesn't exist.
  */
-inline ALint GetChannelIdxByName(const ALCdevice *device, enum Channel chan)
+inline ALint GetChannelIndex(const enum Channel names[MAX_OUTPUT_CHANNELS], enum Channel chan)
 {
-    ALint i = 0;
+    ALint i;
     for(i = 0;i < MAX_OUTPUT_CHANNELS;i++)
     {
-        if(device->ChannelName[i] == chan)
+        if(names[i] == chan)
             return i;
     }
     return -1;
 }
-
+#define GetChannelIdxByName(x, c) GetChannelIndex((x).ChannelName, (c))
 
 extern FILE *LogFile;
 
@@ -724,8 +760,6 @@ enum {
 };
 
 void FillCPUCaps(ALuint capfilter);
-
-FILE *OpenDataFile(const char *fname, const char *subdir);
 
 vector_al_string SearchDataFiles(const char *match, const char *subdir);
 

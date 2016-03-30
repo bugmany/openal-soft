@@ -37,6 +37,7 @@
 #include "backends/base.h"
 
 #include "threads.h"
+#include "almalloc.h"
 
 
 extern inline struct ALsource *LookupSource(ALCcontext *context, ALuint id);
@@ -104,6 +105,9 @@ typedef enum SourceProp {
     srcSampleOffsetLatencySOFT = AL_SAMPLE_OFFSET_LATENCY_SOFT,
     srcSecOffsetLatencySOFT = AL_SEC_OFFSET_LATENCY_SOFT,
 
+    /* AL_EXT_STEREO_ANGLES */
+    srcAngles = AL_STEREO_ANGLES,
+
     /* AL_EXT_BFORMAT */
     srcOrientation = AL_ORIENTATION,
 } SourceProp;
@@ -157,6 +161,7 @@ static ALint FloatValsByProp(ALenum prop)
 
         case AL_SAMPLE_RW_OFFSETS_SOFT:
         case AL_BYTE_RW_OFFSETS_SOFT:
+        case AL_STEREO_ANGLES:
             return 2;
 
         case AL_POSITION:
@@ -221,6 +226,7 @@ static ALint DoubleValsByProp(ALenum prop)
         case AL_SAMPLE_RW_OFFSETS_SOFT:
         case AL_BYTE_RW_OFFSETS_SOFT:
         case AL_SEC_OFFSET_LATENCY_SOFT:
+        case AL_STEREO_ANGLES:
             return 2;
 
         case AL_POSITION:
@@ -299,6 +305,8 @@ static ALint IntValsByProp(ALenum prop)
             break; /* i64 only */
         case AL_SEC_OFFSET_LATENCY_SOFT:
             break; /* Double only */
+        case AL_STEREO_ANGLES:
+            break; /* Float/double only */
     }
     return 0;
 }
@@ -359,6 +367,8 @@ static ALint Int64ValsByProp(ALenum prop)
 
         case AL_SEC_OFFSET_LATENCY_SOFT:
             break; /* Double only */
+        case AL_STEREO_ANGLES:
+            break; /* Float/double only */
     }
     return 0;
 }
@@ -507,6 +517,17 @@ static ALboolean SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp p
             return AL_TRUE;
 
 
+        case AL_STEREO_ANGLES:
+            CHECKVAL(isfinite(values[0]) && isfinite(values[1]));
+
+            LockContext(Context);
+            Source->StereoPan[0] = values[0];
+            Source->StereoPan[1] = values[1];
+            UnlockContext(Context);
+            ATOMIC_STORE(&Source->NeedsUpdate, AL_TRUE);
+            return AL_TRUE;
+
+
         case AL_POSITION:
             CHECKVAL(isfinite(values[0]) && isfinite(values[1]) && isfinite(values[2]));
 
@@ -631,7 +652,6 @@ static ALboolean SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp p
                 newlist = malloc(sizeof(ALbufferlistitem));
                 newlist->buffer = buffer;
                 newlist->next = NULL;
-                newlist->prev = NULL;
                 IncrementRef(&buffer->ref);
 
                 /* Source is now Static */
@@ -831,6 +851,7 @@ static ALboolean SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp p
 
         case AL_SAMPLE_OFFSET_LATENCY_SOFT:
         case AL_SEC_OFFSET_LATENCY_SOFT:
+        case AL_STEREO_ANGLES:
             break;
     }
 
@@ -932,6 +953,7 @@ static ALboolean SetSourcei64v(ALsource *Source, ALCcontext *Context, SourceProp
             return SetSourcefv(Source, Context, (int)prop, fvals);
 
         case AL_SEC_OFFSET_LATENCY_SOFT:
+        case AL_STEREO_ANGLES:
             break;
     }
 
@@ -1052,6 +1074,13 @@ static ALboolean GetSourcedv(ALsource *Source, ALCcontext *Context, SourceProp p
             values[0] = GetSourceSecOffset(Source);
             values[1] = (ALdouble)(V0(device->Backend,getLatency)()) /
                         1000000000.0;
+            UnlockContext(Context);
+            return AL_TRUE;
+
+        case AL_STEREO_ANGLES:
+            LockContext(Context);
+            values[0] = Source->StereoPan[0];
+            values[1] = Source->StereoPan[1];
             UnlockContext(Context);
             return AL_TRUE;
 
@@ -1326,6 +1355,8 @@ static ALboolean GetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp p
             break; /* i64 only */
         case AL_SEC_OFFSET_LATENCY_SOFT:
             break; /* Double only */
+        case AL_STEREO_ANGLES:
+            break; /* Float/double only */
 
         case AL_DIRECT_FILTER:
         case AL_AUXILIARY_SEND_FILTER:
@@ -1447,6 +1478,8 @@ static ALboolean GetSourcei64v(ALsource *Source, ALCcontext *Context, SourceProp
 
         case AL_SEC_OFFSET_LATENCY_SOFT:
             break; /* Double only */
+        case AL_STEREO_ANGLES:
+            break; /* Float/double only */
     }
 
     ERR("Unexpected property: 0x%04x\n", prop);
@@ -2334,19 +2367,15 @@ AL_API ALvoid AL_APIENTRY alSourceQueueBuffers(ALuint src, ALsizei nb, const ALu
         if(!BufferListStart)
         {
             BufferListStart = malloc(sizeof(ALbufferlistitem));
-            BufferListStart->buffer = buffer;
-            BufferListStart->next = NULL;
-            BufferListStart->prev = NULL;
             BufferList = BufferListStart;
         }
         else
         {
             BufferList->next = malloc(sizeof(ALbufferlistitem));
-            BufferList->next->buffer = buffer;
-            BufferList->next->next = NULL;
-            BufferList->next->prev = BufferList;
             BufferList = BufferList->next;
         }
+        BufferList->buffer = buffer;
+        BufferList->next = NULL;
         if(!buffer) continue;
 
         /* Hold a read lock on each buffer being queued while checking all
@@ -2372,26 +2401,27 @@ AL_API ALvoid AL_APIENTRY alSourceQueueBuffers(ALuint src, ALsizei nb, const ALu
         buffer_error:
             /* A buffer failed (invalid ID or format), so unlock and release
              * each buffer we had. */
-            while(BufferList != NULL)
+            while(BufferListStart)
             {
-                ALbufferlistitem *prev = BufferList->prev;
-                if((buffer=BufferList->buffer) != NULL)
+                ALbufferlistitem *next = BufferListStart->next;
+                if((buffer=BufferListStart->buffer) != NULL)
                 {
                     DecrementRef(&buffer->ref);
                     ReadUnlock(&buffer->lock);
                 }
-                free(BufferList);
-                BufferList = prev;
+                free(BufferListStart);
+                BufferListStart = next;
             }
             goto done;
         }
     }
     /* All buffers good, unlock them now. */
+    BufferList = BufferListStart;
     while(BufferList != NULL)
     {
         ALbuffer *buffer = BufferList->buffer;
         if(buffer) ReadUnlock(&buffer->lock);
-        BufferList = BufferList->prev;
+        BufferList = BufferList->next;
     }
 
     /* Source is now streaming */
@@ -2403,10 +2433,11 @@ AL_API ALvoid AL_APIENTRY alSourceQueueBuffers(ALuint src, ALsizei nb, const ALu
         /* Queue head is not NULL, append to the end of the queue */
         while(BufferList->next != NULL)
             BufferList = BufferList->next;
-
-        BufferListStart->prev = BufferList;
         BufferList->next = BufferListStart;
     }
+    /* If the current buffer was at the end (NULL), put it at the start of the newly queued
+     * buffers.
+     */
     BufferList = NULL;
     ATOMIC_COMPARE_EXCHANGE_STRONG(ALbufferlistitem*, &source->current_buffer, &BufferList, BufferListStart);
     WriteUnlock(&source->queue_lock);
@@ -2419,10 +2450,10 @@ AL_API ALvoid AL_APIENTRY alSourceUnqueueBuffers(ALuint src, ALsizei nb, ALuint 
 {
     ALCcontext *context;
     ALsource *source;
-    ALbufferlistitem *NewHead;
     ALbufferlistitem *OldHead;
+    ALbufferlistitem *OldTail;
     ALbufferlistitem *Current;
-    ALsizei i;
+    ALsizei i = 0;
 
     if(nb == 0)
         return;
@@ -2438,13 +2469,16 @@ AL_API ALvoid AL_APIENTRY alSourceUnqueueBuffers(ALuint src, ALsizei nb, ALuint 
 
     WriteLock(&source->queue_lock);
     /* Find the new buffer queue head */
-    NewHead = ATOMIC_LOAD(&source->queue);
+    OldTail = ATOMIC_LOAD(&source->queue);
     Current = ATOMIC_LOAD(&source->current_buffer);
-    for(i = 0;i < nb && NewHead;i++)
+    if(OldTail != Current)
     {
-        if(NewHead == Current)
-            break;
-        NewHead = NewHead->next;
+        for(i = 1;i < nb;i++)
+        {
+            ALbufferlistitem *next = OldTail->next;
+            if(!next || next == Current) break;
+            OldTail = next;
+        }
     }
     if(source->Looping || source->SourceType != AL_STREAMING || i != nb)
     {
@@ -2454,18 +2488,15 @@ AL_API ALvoid AL_APIENTRY alSourceUnqueueBuffers(ALuint src, ALsizei nb, ALuint 
     }
 
     /* Swap it, and cut the new head from the old. */
-    OldHead = ATOMIC_EXCHANGE(ALbufferlistitem*, &source->queue, NewHead);
-    if(NewHead)
+    OldHead = ATOMIC_EXCHANGE(ALbufferlistitem*, &source->queue, OldTail->next);
+    if(OldTail->next)
     {
         ALCdevice *device = context->Device;
-        ALbufferlistitem *OldTail = NewHead->prev;
         uint count;
 
-        /* Cut the new head's link back to the old body. The mixer is robust
-         * enough to handle the link back going away. Once the active mix (if
-         * any) is complete, it's safe to finish cutting the old tail from the
-         * new head. */
-        NewHead->prev = NULL;
+        /* Once the active mix (if any) is done, it's safe to cut the old tail
+         * from the new head.
+         */
         if(((count=ReadRef(&device->MixCount))&1) != 0)
         {
             while(count == ReadRef(&device->MixCount))
@@ -2532,6 +2563,9 @@ static ALvoid InitSourceParams(ALsource *Source)
     Source->RoomRolloffFactor = 0.0f;
     Source->DopplerFactor = 1.0f;
     Source->DirectChannels = AL_FALSE;
+
+    Source->StereoPan[0] = DEG2RAD( 30.0f);
+    Source->StereoPan[1] = DEG2RAD(-30.0f);
 
     Source->Radius = 0.0f;
 
@@ -2643,8 +2677,7 @@ ALvoid SetSourceState(ALsource *Source, ALCcontext *Context, ALenum state)
         if(discontinuity)
             memset(voice->PrevSamples, 0, sizeof(voice->PrevSamples));
 
-        voice->Direct.Moving  = AL_FALSE;
-        voice->Direct.Counter = 0;
+        voice->Moving = AL_FALSE;
         for(i = 0;i < MAX_INPUT_CHANNELS;i++)
         {
             ALsizei j;
@@ -2655,11 +2688,6 @@ ALvoid SetSourceState(ALsource *Source, ALCcontext *Context, ALenum state)
                 voice->Direct.Hrtf[i].State.Values[j][0] = 0.0f;
                 voice->Direct.Hrtf[i].State.Values[j][1] = 0.0f;
             }
-        }
-        for(i = 0;i < (ALsizei)device->NumAuxSends;i++)
-        {
-            voice->Send[i].Moving  = AL_FALSE;
-            voice->Send[i].Counter = 0;
         }
 
         if(BufferList->buffer->FmtChannels == FmtMono)

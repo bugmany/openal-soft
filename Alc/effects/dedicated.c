@@ -45,7 +45,7 @@ static ALboolean ALdedicatedState_deviceUpdate(ALdedicatedState *UNUSED(state), 
     return AL_TRUE;
 }
 
-static ALvoid ALdedicatedState_update(ALdedicatedState *state, ALCdevice *device, const ALeffectslot *Slot)
+static ALvoid ALdedicatedState_update(ALdedicatedState *state, const ALCdevice *device, const ALeffectslot *Slot)
 {
     ALfloat Gain;
     ALuint i;
@@ -57,25 +57,42 @@ static ALvoid ALdedicatedState_update(ALdedicatedState *state, ALCdevice *device
     if(Slot->EffectType == AL_EFFECT_DEDICATED_LOW_FREQUENCY_EFFECT)
     {
         int idx;
-        if((idx=GetChannelIdxByName(device, LFE)) != -1)
+        if((idx=GetChannelIdxByName(device->RealOut, LFE)) != -1)
+        {
             state->gains[idx] = Gain;
+            STATIC_CAST(ALeffectState,state)->OutBuffer = device->RealOut.Buffer;
+            STATIC_CAST(ALeffectState,state)->OutChannels = device->RealOut.NumChannels;
+        }
     }
     else if(Slot->EffectType == AL_EFFECT_DEDICATED_DIALOGUE)
     {
         int idx;
         /* Dialog goes to the front-center speaker if it exists, otherwise it
          * plays from the front-center location. */
-        if((idx=GetChannelIdxByName(device, FrontCenter)) != -1)
+        if((idx=GetChannelIdxByName(device->RealOut, FrontCenter)) != -1)
+        {
             state->gains[idx] = Gain;
+            STATIC_CAST(ALeffectState,state)->OutBuffer = device->RealOut.Buffer;
+            STATIC_CAST(ALeffectState,state)->OutChannels = device->RealOut.NumChannels;
+        }
         else
         {
-            static const ALfloat front_dir[3] = { 0.0f, 0.0f, -1.0f };
-            ComputeDirectionalGains(device, front_dir, Gain, state->gains);
+            if((idx=GetChannelIdxByName(device->Dry, FrontCenter)) != -1)
+                state->gains[idx] = Gain;
+            else
+            {
+                ALfloat coeffs[MAX_AMBI_COEFFS];
+                CalcXYZCoeffs(0.0f, 0.0f, -1.0f, coeffs);
+                ComputePanningGains(device->Dry.AmbiCoeffs, device->Dry.NumChannels,
+                                    coeffs, Gain, state->gains);
+            }
+            STATIC_CAST(ALeffectState,state)->OutBuffer = device->Dry.Buffer;
+            STATIC_CAST(ALeffectState,state)->OutChannels = device->Dry.NumChannels;
         }
     }
 }
 
-static ALvoid ALdedicatedState_process(ALdedicatedState *state, ALuint SamplesToDo, const ALfloat *restrict SamplesIn, ALfloat (*restrict SamplesOut)[BUFFERSIZE], ALuint NumChannels)
+static ALvoid ALdedicatedState_process(ALdedicatedState *state, ALuint SamplesToDo, const ALfloat (*restrict SamplesIn)[BUFFERSIZE], ALfloat (*restrict SamplesOut)[BUFFERSIZE], ALuint NumChannels)
 {
     const ALfloat *gains = state->gains;
     ALuint i, c;
@@ -86,7 +103,7 @@ static ALvoid ALdedicatedState_process(ALdedicatedState *state, ALuint SamplesTo
             continue;
 
         for(i = 0;i < SamplesToDo;i++)
-            SamplesOut[c][i] += SamplesIn[i] * gains[c];
+            SamplesOut[c][i] += SamplesIn[0][i] * gains[c];
     }
 }
 

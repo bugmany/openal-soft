@@ -31,6 +31,8 @@
 #include "alError.h"
 #include "alSource.h"
 
+#include "almalloc.h"
+
 
 extern inline struct ALeffectslot *LookupEffectSlot(ALCcontext *context, ALuint id);
 extern inline struct ALeffectslot *RemoveEffectSlot(ALCcontext *context, ALuint id);
@@ -89,6 +91,8 @@ AL_API ALvoid AL_APIENTRY alGenAuxiliaryEffectSlots(ALsizei n, ALuint *effectslo
             alDeleteAuxiliaryEffectSlots(cur, effectslots);
             SET_ERROR_AND_GOTO(context, err, done);
         }
+
+        aluInitEffectPanning(slot);
 
         VECTOR_PUSH_BACK(slotvec, slot);
 
@@ -462,6 +466,8 @@ ALenum InitializeEffect(ALCdevice *Device, ALeffectslot *EffectSlot, ALeffect *e
         SetMixerFPUMode(&oldMode);
 
         ALCdevice_Lock(Device);
+        State->OutBuffer = Device->Dry.Buffer;
+        State->OutChannels = Device->Dry.NumChannels;
         if(V(State,deviceUpdate)(Device) == AL_FALSE)
         {
             ALCdevice_Unlock(Device);

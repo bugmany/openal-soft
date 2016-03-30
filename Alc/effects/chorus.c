@@ -91,11 +91,10 @@ static ALboolean ALchorusState_deviceUpdate(ALchorusState *state, ALCdevice *Dev
     return AL_TRUE;
 }
 
-static ALvoid ALchorusState_update(ALchorusState *state, ALCdevice *Device, const ALeffectslot *Slot)
+static ALvoid ALchorusState_update(ALchorusState *state, const ALCdevice *Device, const ALeffectslot *Slot)
 {
-    static const ALfloat left_dir[3] = { -1.0f, 0.0f, 0.0f };
-    static const ALfloat right_dir[3] = { 1.0f, 0.0f, 0.0f };
     ALfloat frequency = (ALfloat)Device->Frequency;
+    ALfloat coeffs[MAX_AMBI_COEFFS];
     ALfloat rate;
     ALint phase;
 
@@ -113,8 +112,10 @@ static ALvoid ALchorusState_update(ALchorusState *state, ALCdevice *Device, cons
     state->delay = fastf2i(Slot->EffectProps.Chorus.Delay * frequency);
 
     /* Gains for left and right sides */
-    ComputeDirectionalGains(Device, left_dir, Slot->Gain, state->Gain[0]);
-    ComputeDirectionalGains(Device, right_dir, Slot->Gain, state->Gain[1]);
+    CalcXYZCoeffs(-1.0f, 0.0f, 0.0f, coeffs);
+    ComputePanningGains(Device->Dry.AmbiCoeffs, Device->Dry.NumChannels, coeffs, Slot->Gain, state->Gain[0]);
+    CalcXYZCoeffs( 1.0f, 0.0f, 0.0f, coeffs);
+    ComputePanningGains(Device->Dry.AmbiCoeffs, Device->Dry.NumChannels, coeffs, Slot->Gain, state->Gain[1]);
 
     phase = Slot->EffectProps.Chorus.Phase;
     rate = Slot->EffectProps.Chorus.Rate;
@@ -203,7 +204,7 @@ DECL_TEMPLATE(Sinusoid)
 
 #undef DECL_TEMPLATE
 
-static ALvoid ALchorusState_process(ALchorusState *state, ALuint SamplesToDo, const ALfloat *restrict SamplesIn, ALfloat (*restrict SamplesOut)[BUFFERSIZE], ALuint NumChannels)
+static ALvoid ALchorusState_process(ALchorusState *state, ALuint SamplesToDo, const ALfloat (*restrict SamplesIn)[BUFFERSIZE], ALfloat (*restrict SamplesOut)[BUFFERSIZE], ALuint NumChannels)
 {
     ALuint it, kt;
     ALuint base;
@@ -216,10 +217,10 @@ static ALvoid ALchorusState_process(ALchorusState *state, ALuint SamplesToDo, co
         switch(state->waveform)
         {
             case CWF_Triangle:
-                ProcessTriangle(state, td, SamplesIn+base, temps);
+                ProcessTriangle(state, td, SamplesIn[0]+base, temps);
                 break;
             case CWF_Sinusoid:
-                ProcessSinusoid(state, td, SamplesIn+base, temps);
+                ProcessSinusoid(state, td, SamplesIn[0]+base, temps);
                 break;
         }
 

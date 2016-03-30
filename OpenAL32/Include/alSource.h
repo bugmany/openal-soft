@@ -18,7 +18,6 @@ struct ALsource;
 typedef struct ALbufferlistitem {
     struct ALbuffer *buffer;
     struct ALbufferlistitem *volatile next;
-    struct ALbufferlistitem *volatile prev;
 } ALbufferlistitem;
 
 
@@ -30,6 +29,9 @@ typedef struct ALvoice {
 
     /** Current target parameters used for mixing. */
     ALint Step;
+
+    /* If not 'moving', gain/coefficients are set directly without fading. */
+    ALboolean Moving;
 
     ALboolean IsHrtf;
 
@@ -73,6 +75,11 @@ typedef struct ALsource {
     volatile ALfloat AirAbsorptionFactor;
     volatile ALfloat RoomRolloffFactor;
     volatile ALfloat DopplerFactor;
+
+    /* NOTE: Stereo pan angles are specified in radians, counter-clockwise
+     * rather than clockwise.
+     */
+    volatile ALfloat StereoPan[2];
 
     volatile ALfloat Radius;
 

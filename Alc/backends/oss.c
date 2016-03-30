@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <memory.h>
 #include <unistd.h>
 #include <errno.h>
@@ -52,7 +53,7 @@
 #define SOUND_MIXER_WRITE MIXER_WRITE
 #endif
 
-#if defined(SOUND_VERSION) && (SOUND_VERSION) < 0x040000
+#if defined(SOUND_VERSION) && (SOUND_VERSION < 0x040000)
 #define ALC_OSS_COMPAT
 #endif
 #ifndef SNDCTL_AUDIOINFO
@@ -85,125 +86,142 @@ static struct oss_device oss_capture = {
     NULL
 };
 
-#ifdef ALC_OSS_COMPAT 
+#ifdef ALC_OSS_COMPAT
 
-static void ALCossListPopulate(struct oss_device *playback, struct oss_device *capture)
+static void ALCossListPopulate(struct oss_device *UNUSED(playback), struct oss_device *UNUSED(capture))
 {
-    ; /* Stub */
-}
-
-static void ALCossListFree(struct oss_device *list)
-{
-    ; /* Stub */
 }
 
 #else
 
-static void ALCossListAppend(struct oss_device *list, char *handle, size_t hlen, char *path, size_t plen) {
-    struct oss_device *t;
-    struct oss_device *p;
-    void *m;
+#ifndef HAVE_STRNLEN
+static size_t strnlen(const char *str, size_t maxlen)
+{
+    const char *end = memchr(str, 0, maxlen);
+    if(!end) return maxlen;
+    return end - str;
+}
+#endif
+
+static void ALCossListAppend(struct oss_device *list, const char *handle, size_t hlen, const char *path, size_t plen)
+{
+    struct oss_device *next;
+    struct oss_device *last;
     size_t i;
-    if (list == NULL || handle == NULL || path == NULL || plen == 0 || path[0] == '\0')
-        return;
+
     /* skip the first item "OSS Default" */
-    p = list;
-    t = list->next;
+    last = list;
+    next = list->next;
 #ifdef ALC_OSS_DEVNODE_TRUC
-    for (i = 0; i < plen; i++)
-        if (path[i] == '.')
+    for(i = 0;i < plen;i++)
+    {
+        if(path[i] == '.')
         {
-            if (strncmp(path + i, handle + hlen + i - plen, plen - i) == 0)
+            if(strncmp(path + i, handle + hlen + i - plen, plen - i) == 0)
                 hlen = hlen + i - plen;
             plen = i;
         }
+    }
+#else
+    (void)i;
 #endif
-    if (handle == NULL || hlen == 0 || handle[0] == '\0') {
+    if(handle[0] == '\0')
+    {
         handle = path;
         hlen = plen;
     }
-    while (t != NULL && strncmp(t->path, path, plen) != 0) {
-        p = t;
-        t = t->next;
+
+    while(next != NULL)
+    {
+        if(strncmp(next->path, path, plen) == 0)
+            return;
+        last = next;
+        next = next->next;
     }
-    if (t != NULL)
-        return;
-    m = malloc(sizeof(struct oss_device) + hlen + plen + 2);
-    t = (struct oss_device *)m;
-    t->handle = (char *)((uintptr_t)m + sizeof(struct oss_device));
-    t->path = stpncpy((char *)t->handle, handle, hlen) + 1;
-    ((char *)t->handle)[hlen] = '\0';
-    strncpy((char *)t->path, path, plen);
-    ((char *)t->path)[plen] = '\0';
-    t->next = NULL;
-    p->next = t;
+
+    next = (struct oss_device*)malloc(sizeof(struct oss_device) + hlen + plen + 2);
+    next->handle = (char*)(next + 1);
+    next->path = next->handle + hlen + 1;
+    next->next = NULL;
+    last->next = next;
+
+    strncpy((char*)next->handle, handle, hlen);
+    ((char*)next->handle)[hlen] = '\0';
+    strncpy((char*)next->path, path, plen);
+    ((char*)next->path)[plen] = '\0';
+
+    TRACE("Got device \"%s\", \"%s\"\n", next->handle, next->path);
 }
 
 static void ALCossListPopulate(struct oss_device *playback, struct oss_device *capture)
 {
     struct oss_sysinfo si;
     struct oss_audioinfo ai;
-    int fd;
-    int i;
-    if ((fd = open("/dev/mixer", O_RDONLY)) < 0)
+    int fd, i;
+
+    if((fd=open("/dev/mixer", O_RDONLY)) < 0)
     {
         ERR("Could not open /dev/mixer\n");
         return;
     }
-    if (ioctl(fd, SNDCTL_SYSINFO, &si) == -1)
+    if(ioctl(fd, SNDCTL_SYSINFO, &si) == -1)
     {
-        ERR("SNDCTL_SYSINFO\n");
-        goto err;
+        ERR("SNDCTL_SYSINFO failed: %s\n", strerror(errno));
+        goto done;
     }
-    for (i = 0; i < si.numaudios; i++)
+    for(i = 0;i < si.numaudios;i++)
     {
-        char *handle;
+        const char *handle;
         size_t len;
+
         ai.dev = i;
-        if (ioctl(fd, SNDCTL_AUDIOINFO, &ai) == -1)
+        if(ioctl(fd, SNDCTL_AUDIOINFO, &ai) == -1)
         {
-            ERR("SNDCTL_SYSINFO\n");
+            ERR("SNDCTL_AUDIOINFO (%d) failed: %s\n", i, strerror(errno));
             continue;
         }
-        if (ai.handle[0] == '\0')
-        {
-            len = strnlen(ai.name, sizeof(ai.name));
-            handle = ai.name;
-        }
-        else
+        if(ai.devnode[0] == '\0')
+            continue;
+
+        if(ai.handle[0] != '\0')
         {
             len = strnlen(ai.handle, sizeof(ai.handle));
             handle = ai.handle;
         }
-        if ((ai.caps & DSP_CAP_INPUT) && capture != NULL)
+        else
+        {
+            len = strnlen(ai.name, sizeof(ai.name));
+            handle = ai.name;
+        }
+        if((ai.caps&DSP_CAP_INPUT) && capture != NULL)
             ALCossListAppend(capture, handle, len, ai.devnode, strnlen(ai.devnode, sizeof(ai.devnode)));
-        if ((ai.caps & DSP_CAP_OUTPUT) && playback != NULL)
+        if((ai.caps&DSP_CAP_OUTPUT) && playback != NULL)
             ALCossListAppend(playback, handle, len, ai.devnode, strnlen(ai.devnode, sizeof(ai.devnode)));
     }
-    close(fd);
-    return;
-err:
-    if (fd >= 0)
-        close(fd);
-    return;
-}
 
-static void ALCossListFree(struct oss_device *list)
-{
-    struct oss_device *cur, *t;
-    if (list == NULL)
-        return;
-    cur = list->next;
-    list->next = NULL;
-    while (cur != NULL)
-    {
-        t = cur->next;
-        free(cur);
-        cur = t;
-    }
+done:
+    close(fd);
 }
 
 #endif
+
+static void ALCossListFree(struct oss_device *list)
+{
+    struct oss_device *cur;
+    if(list == NULL)
+        return;
+
+    /* skip the first item "OSS Default" */
+    cur = list->next;
+    list->next = NULL;
+
+    while(cur != NULL)
+    {
+        struct oss_device *next = cur->next;
+        free(cur);
+        cur = next;
+    }
+}
 
 static int log2i(ALCuint x)
 {
@@ -466,10 +484,7 @@ typedef struct ALCcaptureOSS {
 
     int fd;
 
-    ALubyte *read_data;
-    int data_size;
-
-    RingBuffer *ring;
+    ll_ringbuffer_t *ring;
     int doCapture;
 
     volatile int killNow;
@@ -499,7 +514,7 @@ static int ALCcaptureOSS_recordProc(void *ptr)
     ALCcaptureOSS *self = (ALCcaptureOSS*)ptr;
     ALCdevice *device = STATIC_CAST(ALCbackend, self)->mDevice;
     int frameSize;
-    int amt;
+    ssize_t amt;
 
     SetRTPriority();
     althrd_setname(althrd_current(), RECORD_THREAD_NAME);
@@ -508,22 +523,31 @@ static int ALCcaptureOSS_recordProc(void *ptr)
 
     while(!self->killNow)
     {
-        amt = read(self->fd, self->read_data, self->data_size);
-        if(amt < 0)
+        ll_ringbuffer_data_t vec[2];
+
+        amt = 0;
+        if(self->doCapture)
         {
-            ERR("read failed: %s\n", strerror(errno));
-            ALCcaptureOSS_lock(self);
-            aluHandleDisconnect(device);
-            ALCcaptureOSS_unlock(self);
-            break;
+            ll_ringbuffer_get_write_vector(self->ring, vec);
+            if(vec[0].len > 0)
+            {
+                amt = read(self->fd, vec[0].buf, vec[0].len*frameSize);
+                if(amt < 0)
+                {
+                    ERR("read failed: %s\n", strerror(errno));
+                    ALCcaptureOSS_lock(self);
+                    aluHandleDisconnect(device);
+                    ALCcaptureOSS_unlock(self);
+                    break;
+                }
+                ll_ringbuffer_write_advance(self->ring, amt/frameSize);
+            }
         }
         if(amt == 0)
         {
             al_nssleep(1000000);
             continue;
         }
-        if(self->doCapture)
-            WriteRingBuffer(self->ring, self->read_data, amt/frameSize);
     }
 
     return 0;
@@ -639,7 +663,7 @@ static ALCenum ALCcaptureOSS_open(ALCcaptureOSS *self, const ALCchar *name)
         return ALC_INVALID_VALUE;
     }
 
-    self->ring = CreateRingBuffer(frameSize, device->UpdateSize * device->NumUpdates);
+    self->ring = ll_ringbuffer_create(device->UpdateSize*device->NumUpdates + 1, frameSize);
     if(!self->ring)
     {
         ERR("Ring buffer create failed\n");
@@ -648,13 +672,11 @@ static ALCenum ALCcaptureOSS_open(ALCcaptureOSS *self, const ALCchar *name)
         return ALC_OUT_OF_MEMORY;
     }
 
-    self->data_size = info.fragsize;
-    self->read_data = calloc(1, self->data_size);
-
     self->killNow = 0;
     if(althrd_create(&self->thread, ALCcaptureOSS_recordProc, self) != althrd_success)
     {
-        device->ExtraData = NULL;
+        ll_ringbuffer_free(self->ring);
+        self->ring = NULL;
         close(self->fd);
         self->fd = -1;
         return ALC_OUT_OF_MEMORY;
@@ -675,11 +697,8 @@ static void ALCcaptureOSS_close(ALCcaptureOSS *self)
     close(self->fd);
     self->fd = -1;
 
-    DestroyRingBuffer(self->ring);
+    ll_ringbuffer_free(self->ring);
     self->ring = NULL;
-
-    free(self->read_data);
-    self->read_data = NULL;
 }
 
 static ALCboolean ALCcaptureOSS_start(ALCcaptureOSS *self)
@@ -695,13 +714,13 @@ static void ALCcaptureOSS_stop(ALCcaptureOSS *self)
 
 static ALCenum ALCcaptureOSS_captureSamples(ALCcaptureOSS *self, ALCvoid *buffer, ALCuint samples)
 {
-    ReadRingBuffer(self->ring, buffer, samples);
+    ll_ringbuffer_read(self->ring, buffer, samples);
     return ALC_NO_ERROR;
 }
 
 static ALCuint ALCcaptureOSS_availableSamples(ALCcaptureOSS *self)
 {
-    return RingBufferSize(self->ring);
+    return ll_ringbuffer_read_space(self->ring);
 }
 
 

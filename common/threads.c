@@ -264,10 +264,19 @@ int alcnd_timedwait(alcnd_t *cond, almtx_t *mtx, const struct timespec *time_poi
     if(altimespec_get(&curtime, AL_TIME_UTC) != AL_TIME_UTC)
         return althrd_error;
 
-    sleeptime  = (time_point->tv_nsec - curtime.tv_nsec + 999999)/1000000;
-    sleeptime += (time_point->tv_sec - curtime.tv_sec)*1000;
-    if(SleepConditionVariableCS(cond, mtx, sleeptime) != 0)
-        return althrd_success;
+    if(curtime.tv_sec > time_point->tv_sec || (curtime.tv_sec == time_point->tv_sec &&
+                                               curtime.tv_nsec >= time_point->tv_nsec))
+    {
+        if(SleepConditionVariableCS(cond, mtx, 0) != 0)
+            return althrd_success;
+    }
+    else
+    {
+        sleeptime  = (time_point->tv_nsec - curtime.tv_nsec + 999999)/1000000;
+        sleeptime += (time_point->tv_sec - curtime.tv_sec)*1000;
+        if(SleepConditionVariableCS(cond, mtx, sleeptime) != 0)
+            return althrd_success;
+    }
     return (GetLastError()==ERROR_TIMEOUT) ? althrd_timedout : althrd_error;
 }
 
@@ -306,8 +315,8 @@ int alcnd_init(alcnd_t *cond)
 
     InitRef(&icond->wait_count, 0);
 
-    icond->events[SIGNAL] = CreateEvent(NULL, FALSE, FALSE, NULL);
-    icond->events[BROADCAST] = CreateEvent(NULL, TRUE, FALSE, NULL);
+    icond->events[SIGNAL] = CreateEventW(NULL, FALSE, FALSE, NULL);
+    icond->events[BROADCAST] = CreateEventW(NULL, TRUE, FALSE, NULL);
     if(!icond->events[SIGNAL] || !icond->events[BROADCAST])
     {
         if(icond->events[SIGNAL])
@@ -364,8 +373,15 @@ int alcnd_timedwait(alcnd_t *cond, almtx_t *mtx, const struct timespec *time_poi
 
     if(altimespec_get(&curtime, AL_TIME_UTC) != AL_TIME_UTC)
         return althrd_error;
-    sleeptime  = (time_point->tv_nsec - curtime.tv_nsec + 999999)/1000000;
-    sleeptime += (time_point->tv_sec - curtime.tv_sec)*1000;
+
+    if(curtime.tv_sec > time_point->tv_sec || (curtime.tv_sec == time_point->tv_sec &&
+                                               curtime.tv_nsec >= time_point->tv_nsec))
+        sleeptime = 0;
+    else
+    {
+        sleeptime  = (time_point->tv_nsec - curtime.tv_nsec + 999999)/1000000;
+        sleeptime += (time_point->tv_sec - curtime.tv_sec)*1000;
+    }
 
     IncrementRef(&icond->wait_count);
     LeaveCriticalSection(mtx);
@@ -497,10 +513,10 @@ extern inline void alcall_once(alonce_flag *once, void (*callback)(void));
 void althrd_setname(althrd_t thr, const char *name)
 {
 #if defined(HAVE_PTHREAD_SETNAME_NP)
-#if defined(__APPLE__)
+#if defined(PTHREAD_SETNAME_NP_ONE_PARAM)
     if(althrd_equal(thr, althrd_current()))
         pthread_setname_np(name);
-#elif defined(__GNUC__)
+#else
     pthread_setname_np(thr, name);
 #endif
 #elif defined(HAVE_PTHREAD_SET_NAME_NP)

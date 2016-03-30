@@ -52,7 +52,7 @@ static ALboolean ALdistortionState_deviceUpdate(ALdistortionState *UNUSED(state)
     return AL_TRUE;
 }
 
-static ALvoid ALdistortionState_update(ALdistortionState *state, ALCdevice *Device, const ALeffectslot *Slot)
+static ALvoid ALdistortionState_update(ALdistortionState *state, const ALCdevice *Device, const ALeffectslot *Slot)
 {
     ALfloat frequency = (ALfloat)Device->Frequency;
     ALfloat bandwidth;
@@ -83,10 +83,10 @@ static ALvoid ALdistortionState_update(ALdistortionState *state, ALCdevice *Devi
         cutoff / (frequency*4.0f), calc_rcpQ_from_bandwidth(cutoff / (frequency*4.0f), bandwidth)
     );
 
-    ComputeAmbientGains(Device, Slot->Gain, state->Gain);
+    ComputeAmbientGains(Device->Dry.AmbiCoeffs, Device->Dry.NumChannels, Slot->Gain, state->Gain);
 }
 
-static ALvoid ALdistortionState_process(ALdistortionState *state, ALuint SamplesToDo, const ALfloat *restrict SamplesIn, ALfloat (*restrict SamplesOut)[BUFFERSIZE], ALuint NumChannels)
+static ALvoid ALdistortionState_process(ALdistortionState *state, ALuint SamplesToDo, const ALfloat (*restrict SamplesIn)[BUFFERSIZE], ALfloat (*restrict SamplesOut)[BUFFERSIZE], ALuint NumChannels)
 {
     const ALfloat fc = state->edge_coeff;
     ALuint base;
@@ -108,7 +108,7 @@ static ALvoid ALdistortionState_process(ALdistortionState *state, ALuint Samples
         /* Fill oversample buffer using zero stuffing */
         for(it = 0;it < td;it++)
         {
-            oversample_buffer[it][0] = SamplesIn[it+base];
+            oversample_buffer[it][0] = SamplesIn[0][it+base];
             oversample_buffer[it][1] = 0.0f;
             oversample_buffer[it][2] = 0.0f;
             oversample_buffer[it][3] = 0.0f;
