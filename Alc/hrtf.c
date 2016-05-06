@@ -96,11 +96,14 @@ static void CalcAzIndices(ALuint azcount, ALfloat az, ALuint *azidx, ALfloat *az
  * increase the apparent resolution of the HRIR data set.  The coefficients
  * are also normalized and attenuated by the specified gain.
  */
-void GetLerpedHrtfCoeffs(const struct Hrtf *Hrtf, ALfloat elevation, ALfloat azimuth, ALfloat dirfact, ALfloat gain, ALfloat (*coeffs)[2], ALuint *delays)
+void GetLerpedHrtfCoeffs(const struct Hrtf *Hrtf, ALfloat elevation, ALfloat azimuth, ALfloat spread, ALfloat gain, ALfloat (*coeffs)[2], ALuint *delays)
 {
     ALuint evidx[2], lidx[4], ridx[4];
     ALfloat mu[3], blend[4];
+    ALfloat dirfact;
     ALuint i;
+
+    dirfact = 1.0f - (spread / F_TAU);
 
     /* Claculate elevation indices and interpolation factor. */
     CalcEvIndices(Hrtf->evCount, elevation, evidx, &mu[2]);
@@ -595,7 +598,7 @@ static void AddFileEntry(vector_HrtfEntry *list, al_string *filename)
 #define MATCH_NAME(i)  (al_string_cmp(entry.name, (i)->name) == 0)
         VECTOR_FIND_IF(iter, const HrtfEntry, *list, MATCH_NAME);
 #undef MATCH_NAME
-    } while(iter != VECTOR_ITER_END(*list));
+    } while(iter != VECTOR_END(*list));
 
     TRACE("Adding entry \"%s\" from file \"%s\"\n", al_string_get_cstr(entry.name),
           al_string_get_cstr(*filename));
@@ -667,11 +670,11 @@ vector_HrtfEntry EnumerateHrtf(const_al_string devname)
         /* Find the preferred HRTF and move it to the front of the list. */
 #define FIND_ENTRY(i)  (al_string_cmp_cstr((i)->name, defaulthrtf) == 0)
         VECTOR_FIND_IF(iter, const HrtfEntry, list, FIND_ENTRY);
-        if(iter != VECTOR_ITER_END(list) && iter != VECTOR_ITER_BEGIN(list))
+        if(iter != VECTOR_END(list) && iter != VECTOR_BEGIN(list))
         {
             HrtfEntry entry = *iter;
             memmove(&VECTOR_ELEM(list,1), &VECTOR_ELEM(list,0),
-                    (iter-VECTOR_ITER_BEGIN(list))*sizeof(HrtfEntry));
+                    (iter-VECTOR_BEGIN(list))*sizeof(HrtfEntry));
             VECTOR_ELEM(list,0) = entry;
         }
         else

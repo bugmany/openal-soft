@@ -1,6 +1,7 @@
 
 #include "config.h"
 
+#include <iostream>
 #include <cmath>
 
 #include <QFileDialog>
@@ -321,9 +322,9 @@ MainWindow::MainWindow(QWidget *parent) :
     connect(ui->decoder51RearLineEdit, SIGNAL(textChanged(QString)), this, SLOT(enableApplyButton()));
     connect(ui->decoder51RearButton, SIGNAL(clicked()), this, SLOT(select51RearDecoderFile()));
     connect(ui->decoder61LineEdit, SIGNAL(textChanged(QString)), this, SLOT(enableApplyButton()));
-    connect(ui->decoder61Button, SIGNAL(clicked()), this, SLOT(select71DecoderFile()));
+    connect(ui->decoder61Button, SIGNAL(clicked()), this, SLOT(select61DecoderFile()));
     connect(ui->decoder71LineEdit, SIGNAL(textChanged(QString)), this, SLOT(enableApplyButton()));
-    connect(ui->decoder71Button, SIGNAL(clicked()), this, SLOT(select61DecoderFile()));
+    connect(ui->decoder71Button, SIGNAL(clicked()), this, SLOT(select71DecoderFile()));
 
     connect(ui->preferredHrtfComboBox, SIGNAL(currentIndexChanged(const QString&)), this, SLOT(enableApplyButton()));
     connect(ui->hrtfStateComboBox, SIGNAL(currentIndexChanged(const QString&)), this, SLOT(enableApplyButton()));
@@ -1091,8 +1092,22 @@ void MainWindow::select71DecoderFile()
 { selectDecoderFile(ui->decoder71LineEdit, "Select 7.1 Surround Decoder");}
 void MainWindow::selectDecoderFile(QLineEdit *line, const char *caption)
 {
+    QString dir = line->text();
+    if(dir.isEmpty() || QDir::isRelativePath(dir))
+    {
+        QStringList paths = getAllDataPaths("/openal/presets");
+        while(!paths.isEmpty())
+        {
+            if(QDir(paths.last()).exists())
+            {
+                dir = paths.last();
+                break;
+            }
+            paths.removeLast();
+        }
+    }
     QString fname = QFileDialog::getOpenFileName(this, tr(caption),
-        line->text(), tr("AmbDec Files (*.ambdec);;All Files (*.*)")
+        dir, tr("AmbDec Files (*.ambdec);;All Files (*.*)")
     );
     if(!fname.isEmpty())
     {

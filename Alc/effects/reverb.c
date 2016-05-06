@@ -387,7 +387,7 @@ static ALboolean ALreverbState_deviceUpdate(ALreverbState *State, ALCdevice *Dev
     /* WARNING: This assumes the real output follows the virtual output in the
      * device's DryBuffer.
      */
-    if(Device->Hrtf || Device->Uhj_Encoder || Device->AmbiDecoder)
+    if(Device->Hrtf || Device->Uhj_Encoder)
         State->ExtraChannels = ChannelsFromDevFmt(Device->FmtChans);
     else
         State->ExtraChannels = 0;
@@ -719,8 +719,8 @@ static ALvoid UpdateMixedPanning(const ALCdevice *Device, const ALfloat *Reflect
         };
         length = minf(length, 1.0f);
 
-        CalcDirectionCoeffs(pan, coeffs);
-        ComputePanningGains(Device->Dry.AmbiCoeffs, Device->Dry.NumChannels, coeffs, Gain, DirGains);
+        CalcDirectionCoeffs(pan, 0.0f, coeffs);
+        ComputePanningGains(Device->Dry, coeffs, Gain, DirGains);
         for(i = 0;i < Device->Dry.NumChannels;i++)
             State->Early.PanGain[3][i] = DirGains[i] * EarlyGain * length;
         for(i = 0;i < Device->RealOut.NumChannels;i++)
@@ -743,8 +743,8 @@ static ALvoid UpdateMixedPanning(const ALCdevice *Device, const ALfloat *Reflect
         };
         length = minf(length, 1.0f);
 
-        CalcDirectionCoeffs(pan, coeffs);
-        ComputePanningGains(Device->Dry.AmbiCoeffs, Device->Dry.NumChannels, coeffs, Gain, DirGains);
+        CalcDirectionCoeffs(pan, 0.0f, coeffs);
+        ComputePanningGains(Device->Dry, coeffs, Gain, DirGains);
         for(i = 0;i < Device->Dry.NumChannels;i++)
             State->Late.PanGain[3][i] = DirGains[i] * LateGain * length;
         for(i = 0;i < Device->RealOut.NumChannels;i++)
@@ -761,8 +761,7 @@ static ALvoid UpdateDirectPanning(const ALCdevice *Device, const ALfloat *Reflec
     ALuint i;
 
     /* Apply a boost of about 3dB to better match the expected stereo output volume. */
-    ComputeAmbientGains(Device->Dry.AmbiCoeffs, Device->Dry.NumChannels,
-                        Gain*1.414213562f, AmbientGains);
+    ComputeAmbientGains(Device->Dry, Gain*1.414213562f, AmbientGains);
 
     memset(State->Early.PanGain, 0, sizeof(State->Early.PanGain));
     length = sqrtf(ReflectionsPan[0]*ReflectionsPan[0] + ReflectionsPan[1]*ReflectionsPan[1] + ReflectionsPan[2]*ReflectionsPan[2]);
@@ -784,9 +783,8 @@ static ALvoid UpdateDirectPanning(const ALCdevice *Device, const ALfloat *Reflec
         };
         length = minf(length, 1.0f);
 
-        CalcDirectionCoeffs(pan, coeffs);
-        ComputePanningGains(Device->Dry.AmbiCoeffs, Device->Dry.NumChannels, coeffs,
-                            Gain, DirGains);
+        CalcDirectionCoeffs(pan, 0.0f, coeffs);
+        ComputePanningGains(Device->Dry, coeffs, Gain, DirGains);
         for(i = 0;i < Device->Dry.NumChannels;i++)
             State->Early.PanGain[i&3][i] = lerp(AmbientGains[i], DirGains[i], length) * EarlyGain;
     }
@@ -807,9 +805,8 @@ static ALvoid UpdateDirectPanning(const ALCdevice *Device, const ALfloat *Reflec
         };
         length = minf(length, 1.0f);
 
-        CalcDirectionCoeffs(pan, coeffs);
-        ComputePanningGains(Device->Dry.AmbiCoeffs, Device->Dry.NumChannels, coeffs,
-                            Gain, DirGains);
+        CalcDirectionCoeffs(pan, 0.0f, coeffs);
+        ComputePanningGains(Device->Dry, coeffs, Gain, DirGains);
         for(i = 0;i < Device->Dry.NumChannels;i++)
             State->Late.PanGain[i&3][i] = lerp(AmbientGains[i], DirGains[i], length) * LateGain;
     }
@@ -858,9 +855,9 @@ static ALvoid Update3DPanning(const ALCdevice *Device, const ALfloat *Reflection
     }
     for(i = 0;i < 4;i++)
     {
-        CalcDirectionCoeffs(PanDirs[i], coeffs);
-        ComputePanningGains(Device->Dry.AmbiCoeffs, Device->Dry.NumChannels, coeffs,
-                            Gain*EarlyGain*gain[i], State->Early.PanGain[i]);
+        CalcDirectionCoeffs(PanDirs[i], 0.0f, coeffs);
+        ComputePanningGains(Device->Dry, coeffs, Gain*EarlyGain*gain[i],
+                            State->Early.PanGain[i]);
     }
 
     gain[0] = gain[1] = gain[2] = gain[3] = 0.5f;
@@ -889,9 +886,9 @@ static ALvoid Update3DPanning(const ALCdevice *Device, const ALfloat *Reflection
     }
     for(i = 0;i < 4;i++)
     {
-        CalcDirectionCoeffs(PanDirs[i], coeffs);
-        ComputePanningGains(Device->Dry.AmbiCoeffs, Device->Dry.NumChannels, coeffs,
-                            Gain*LateGain*gain[i], State->Late.PanGain[i]);
+        CalcDirectionCoeffs(PanDirs[i], 0.0f, coeffs);
+        ComputePanningGains(Device->Dry, coeffs, Gain*LateGain*gain[i],
+                            State->Late.PanGain[i]);
     }
 }
 
@@ -957,12 +954,12 @@ static ALvoid ALreverbState_update(ALreverbState *State, const ALCdevice *Device
 
     gain = props->Reverb.Gain * Slot->Gain * ReverbBoost;
     // Update early and late 3D panning.
-    if(Device->Hrtf || Device->Uhj_Encoder || Device->AmbiDecoder)
+    if(Device->Hrtf || Device->Uhj_Encoder)
         UpdateMixedPanning(Device, props->Reverb.ReflectionsPan,
                            props->Reverb.LateReverbPan, gain,
                            props->Reverb.ReflectionsGain,
                            props->Reverb.LateReverbGain, State);
-    else if(Device->FmtChans == DevFmtBFormat3D)
+    else if(Device->FmtChans == DevFmtBFormat3D || Device->AmbiDecoder)
         Update3DPanning(Device, props->Reverb.ReflectionsPan,
                         props->Reverb.LateReverbPan, gain,
                         props->Reverb.ReflectionsGain,

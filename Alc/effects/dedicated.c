@@ -59,9 +59,9 @@ static ALvoid ALdedicatedState_update(ALdedicatedState *state, const ALCdevice *
         int idx;
         if((idx=GetChannelIdxByName(device->RealOut, LFE)) != -1)
         {
-            state->gains[idx] = Gain;
             STATIC_CAST(ALeffectState,state)->OutBuffer = device->RealOut.Buffer;
             STATIC_CAST(ALeffectState,state)->OutChannels = device->RealOut.NumChannels;
+            state->gains[idx] = Gain;
         }
     }
     else if(Slot->EffectType == AL_EFFECT_DEDICATED_DIALOGUE)
@@ -71,23 +71,18 @@ static ALvoid ALdedicatedState_update(ALdedicatedState *state, const ALCdevice *
          * plays from the front-center location. */
         if((idx=GetChannelIdxByName(device->RealOut, FrontCenter)) != -1)
         {
-            state->gains[idx] = Gain;
             STATIC_CAST(ALeffectState,state)->OutBuffer = device->RealOut.Buffer;
             STATIC_CAST(ALeffectState,state)->OutChannels = device->RealOut.NumChannels;
+            state->gains[idx] = Gain;
         }
         else
         {
-            if((idx=GetChannelIdxByName(device->Dry, FrontCenter)) != -1)
-                state->gains[idx] = Gain;
-            else
-            {
-                ALfloat coeffs[MAX_AMBI_COEFFS];
-                CalcXYZCoeffs(0.0f, 0.0f, -1.0f, coeffs);
-                ComputePanningGains(device->Dry.AmbiCoeffs, device->Dry.NumChannels,
-                                    coeffs, Gain, state->gains);
-            }
+            ALfloat coeffs[MAX_AMBI_COEFFS];
+            CalcXYZCoeffs(0.0f, 0.0f, -1.0f, 0.0f, coeffs);
+
             STATIC_CAST(ALeffectState,state)->OutBuffer = device->Dry.Buffer;
             STATIC_CAST(ALeffectState,state)->OutChannels = device->Dry.NumChannels;
+            ComputePanningGains(device->Dry, coeffs, Gain, state->gains);
         }
     }
 }

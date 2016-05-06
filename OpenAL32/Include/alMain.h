@@ -51,6 +51,79 @@ ALC_API void ALC_APIENTRY alcGetInteger64vSOFT(ALCdevice *device, ALCenum pname,
 #endif
 #endif
 
+#ifndef AL_SOFT_buffer_samples2
+#define AL_SOFT_buffer_samples2 1
+/* Channel configurations */
+#define AL_MONO_SOFT                             0x1500
+#define AL_STEREO_SOFT                           0x1501
+#define AL_REAR_SOFT                             0x1502
+#define AL_QUAD_SOFT                             0x1503
+#define AL_5POINT1_SOFT                          0x1504
+#define AL_6POINT1_SOFT                          0x1505
+#define AL_7POINT1_SOFT                          0x1506
+#define AL_BFORMAT2D_SOFT                        0x1507
+#define AL_BFORMAT3D_SOFT                        0x1508
+
+/* Sample types */
+#define AL_BYTE_SOFT                             0x1400
+#define AL_UNSIGNED_BYTE_SOFT                    0x1401
+#define AL_SHORT_SOFT                            0x1402
+#define AL_UNSIGNED_SHORT_SOFT                   0x1403
+#define AL_INT_SOFT                              0x1404
+#define AL_UNSIGNED_INT_SOFT                     0x1405
+#define AL_FLOAT_SOFT                            0x1406
+#define AL_DOUBLE_SOFT                           0x1407
+#define AL_BYTE3_SOFT                            0x1408
+#define AL_UNSIGNED_BYTE3_SOFT                   0x1409
+#define AL_MULAW_SOFT                            0x140A
+
+/* Storage formats */
+#define AL_MONO8_SOFT                            0x1100
+#define AL_MONO16_SOFT                           0x1101
+#define AL_MONO32F_SOFT                          0x10010
+#define AL_STEREO8_SOFT                          0x1102
+#define AL_STEREO16_SOFT                         0x1103
+#define AL_STEREO32F_SOFT                        0x10011
+#define AL_QUAD8_SOFT                            0x1204
+#define AL_QUAD16_SOFT                           0x1205
+#define AL_QUAD32F_SOFT                          0x1206
+#define AL_REAR8_SOFT                            0x1207
+#define AL_REAR16_SOFT                           0x1208
+#define AL_REAR32F_SOFT                          0x1209
+#define AL_5POINT1_8_SOFT                        0x120A
+#define AL_5POINT1_16_SOFT                       0x120B
+#define AL_5POINT1_32F_SOFT                      0x120C
+#define AL_6POINT1_8_SOFT                        0x120D
+#define AL_6POINT1_16_SOFT                       0x120E
+#define AL_6POINT1_32F_SOFT                      0x120F
+#define AL_7POINT1_8_SOFT                        0x1210
+#define AL_7POINT1_16_SOFT                       0x1211
+#define AL_7POINT1_32F_SOFT                      0x1212
+#define AL_BFORMAT2D_8_SOFT                      0x20021
+#define AL_BFORMAT2D_16_SOFT                     0x20022
+#define AL_BFORMAT2D_32F_SOFT                    0x20023
+#define AL_BFORMAT3D_8_SOFT                      0x20031
+#define AL_BFORMAT3D_16_SOFT                     0x20032
+#define AL_BFORMAT3D_32F_SOFT                    0x20033
+
+/* Buffer attributes */
+#define AL_INTERNAL_FORMAT_SOFT                  0x2008
+#define AL_BYTE_LENGTH_SOFT                      0x2009
+#define AL_SAMPLE_LENGTH_SOFT                    0x200A
+#define AL_SEC_LENGTH_SOFT                       0x200B
+
+#if 0
+typedef void (AL_APIENTRY*LPALBUFFERSAMPLESSOFT)(ALuint,ALuint,ALenum,ALsizei,ALenum,ALenum,const ALvoid*);
+typedef void (AL_APIENTRY*LPALGETBUFFERSAMPLESSOFT)(ALuint,ALsizei,ALsizei,ALenum,ALenum,ALvoid*);
+typedef ALboolean (AL_APIENTRY*LPALISBUFFERFORMATSUPPORTEDSOFT)(ALenum);
+#ifdef AL_ALEXT_PROTOTYPES
+AL_API void AL_APIENTRY alBufferSamplesSOFT(ALuint buffer, ALuint samplerate, ALenum internalformat, ALsizei samples, ALenum channels, ALenum type, const ALvoid *data);
+AL_API void AL_APIENTRY alGetBufferSamplesSOFT(ALuint buffer, ALsizei offset, ALsizei samples, ALenum channels, ALenum type, ALvoid *data);
+AL_API ALboolean AL_APIENTRY alIsBufferFormatSupportedSOFT(ALenum format);
+#endif
+#endif
+#endif
+
 
 typedef ALint64SOFT ALint64;
 typedef ALuint64SOFT ALuint64;
@@ -336,6 +409,13 @@ enum Channel {
     Aux6,
     Aux7,
     Aux8,
+    Aux9,
+    Aux10,
+    Aux11,
+    Aux12,
+    Aux13,
+    Aux14,
+    Aux15,
 
     InvalidChannel
 };
@@ -368,7 +448,7 @@ enum DevFmtChannels {
 
     DevFmtChannelsDefault = DevFmtStereo
 };
-#define MAX_OUTPUT_CHANNELS  (9)
+#define MAX_OUTPUT_CHANNELS  (16)
 
 ALuint BytesFromDevFmt(enum DevFmtType type) DECL_CONST;
 ALuint ChannelsFromDevFmt(enum DevFmtChannels chans) DECL_CONST;
@@ -407,6 +487,10 @@ enum RenderMode {
 #define MAX_AMBI_COEFFS ((MAX_AMBI_ORDER+1) * (MAX_AMBI_ORDER+1))
 
 typedef ALfloat ChannelConfig[MAX_AMBI_COEFFS];
+typedef struct BFChannelConfig {
+    ALfloat Scale;
+    ALuint Index;
+} BFChannelConfig;
 
 
 #define HRTF_HISTORY_BITS   (6)
@@ -472,6 +556,8 @@ struct ALCdevice_struct
     al_string Hrtf_Name;
     const struct Hrtf *Hrtf;
     ALCenum Hrtf_Status;
+
+    /* HRTF filter state for dry buffer content */
     HrtfState Hrtf_State[MAX_OUTPUT_CHANNELS];
     HrtfParams Hrtf_Params[MAX_OUTPUT_CHANNELS];
     ALuint Hrtf_Offset;
@@ -479,11 +565,11 @@ struct ALCdevice_struct
     /* UHJ encoder state */
     struct Uhj2Encoder *Uhj_Encoder;
 
-    // Stereo-to-binaural filter
-    struct bs2b *Bs2b;
-
     /* High quality Ambisonic decoder */
     struct BFormatDec *AmbiDecoder;
+
+    // Stereo-to-binaural filter
+    struct bs2b *Bs2b;
 
     /* Rendering mode. */
     enum RenderMode Render_Mode;
@@ -501,10 +587,16 @@ struct ALCdevice_struct
 
     /* The "dry" path corresponds to the main output. */
     struct {
-        /* Channel names for the dry buffer mix. */
-        enum Channel ChannelName[MAX_OUTPUT_CHANNELS];
-        /* Ambisonic coefficients for mixing to the dry buffer. */
-        ChannelConfig AmbiCoeffs[MAX_OUTPUT_CHANNELS];
+        union {
+            /* Ambisonic coefficients for mixing to the dry buffer. */
+            ChannelConfig Coeffs[MAX_OUTPUT_CHANNELS];
+            /* Coefficient channel mapping for mixing to the dry buffer. */
+            BFChannelConfig Map[MAX_OUTPUT_CHANNELS];
+        } Ambi;
+        /* Number of coefficients in each ChannelConfig to mix together (4 for
+         * first-order, 9 for second-order, etc).
+         */
+        ALuint CoeffCount;
 
         /* Dry buffer will be aliased by the virtual or real output. */
         ALfloat (*Buffer)[BUFFERSIZE];
@@ -513,8 +605,12 @@ struct ALCdevice_struct
 
     /* First-order ambisonics output, to be upsampled to the dry buffer if different. */
     struct {
-        /* Ambisonic coefficients for mixing. */
-        ChannelConfig AmbiCoeffs[MAX_OUTPUT_CHANNELS];
+        union {
+            ChannelConfig Coeffs[MAX_OUTPUT_CHANNELS];
+            BFChannelConfig Map[MAX_OUTPUT_CHANNELS];
+        } Ambi;
+        /* Will only be 4 or 0. */
+        ALuint CoeffCount;
 
         ALfloat (*Buffer)[BUFFERSIZE];
         ALuint NumChannels;

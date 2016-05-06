@@ -527,7 +527,7 @@ static void ALCpulsePlayback_deviceCallback(pa_context *UNUSED(context), const p
 
 #define MATCH_INFO_NAME(iter) (al_string_cmp_cstr((iter)->device_name, info->name) == 0)
     VECTOR_FIND_IF(iter, const DevMap, PlaybackDevices, MATCH_INFO_NAME);
-    if(iter != VECTOR_ITER_END(PlaybackDevices)) return;
+    if(iter != VECTOR_END(PlaybackDevices)) return;
 #undef MATCH_INFO_NAME
 
     AL_STRING_INIT(entry.name);
@@ -548,7 +548,7 @@ static void ALCpulsePlayback_deviceCallback(pa_context *UNUSED(context), const p
 
 #define MATCH_ENTRY(i) (al_string_cmp(entry.name, (i)->name) == 0)
         VECTOR_FIND_IF(iter, const DevMap, PlaybackDevices, MATCH_ENTRY);
-        if(iter == VECTOR_ITER_END(PlaybackDevices)) break;
+        if(iter == VECTOR_END(PlaybackDevices)) break;
 #undef MATCH_ENTRY
         count++;
     }
@@ -861,7 +861,7 @@ static ALCenum ALCpulsePlayback_open(ALCpulsePlayback *self, const ALCchar *name
 #define MATCH_NAME(iter) (al_string_cmp_cstr((iter)->name, name) == 0)
         VECTOR_FIND_IF(iter, const DevMap, PlaybackDevices, MATCH_NAME);
 #undef MATCH_NAME
-        if(iter == VECTOR_ITER_END(PlaybackDevices))
+        if(iter == VECTOR_END(PlaybackDevices))
             return ALC_INVALID_VALUE;
         pulse_name = al_string_get_cstr(iter->device_name);
         dev_name = iter->name;
@@ -1051,10 +1051,12 @@ static ALCboolean ALCpulsePlayback_reset(ALCpulsePlayback *self)
     {
         /* Server updated our playback rate, so modify the buffer attribs
          * accordingly. */
-        device->NumUpdates = (ALuint)((ALdouble)device->NumUpdates / device->Frequency *
-                                      self->spec.rate + 0.5);
+        device->NumUpdates = (ALuint)clampd(
+            (ALdouble)device->NumUpdates/device->Frequency*self->spec.rate + 0.5, 2.0, 16.0
+        );
+
         self->attr.minreq  = device->UpdateSize * pa_frame_size(&self->spec);
-        self->attr.tlength = self->attr.minreq * clampu(device->NumUpdates, 2, 16);
+        self->attr.tlength = self->attr.minreq * device->NumUpdates;
         self->attr.maxlength = -1;
         self->attr.prebuf  = 0;
 
@@ -1069,9 +1071,30 @@ static ALCboolean ALCpulsePlayback_reset(ALCpulsePlayback *self)
     ALCpulsePlayback_bufferAttrCallback(self->stream, self);
 
     len = self->attr.minreq / pa_frame_size(&self->spec);
-    device->NumUpdates = (ALuint)((ALdouble)device->NumUpdates/len*device->UpdateSize + 0.5);
-    device->NumUpdates = clampu(device->NumUpdates, 2, 16);
+    device->NumUpdates = (ALuint)clampd(
+        (ALdouble)device->NumUpdates/len*device->UpdateSize + 0.5, 2.0, 16.0
+    );
     device->UpdateSize = len;
+
+    /* HACK: prebuf should be 0 as that's what we set it to. However on some
+     * systems it comes back as non-0, so we have to make sure the device will
+     * write enough audio to start playback. The lack of manual start control
+     * may have unintended consequences, but it's better than not starting at
+     * all.
+     */
+    if(self->attr.prebuf != 0)
+    {
+        len = self->attr.prebuf / pa_frame_size(&self->spec);
+        if(len <= device->UpdateSize*device->NumUpdates)
+            ERR("Non-0 prebuf, %u samples (%u bytes), device has %u samples\n",
+                len, self->attr.prebuf, device->UpdateSize*device->NumUpdates);
+        else
+        {
+            ERR("Large prebuf, %u samples (%u bytes), increasing device from %u samples",
+                len, self->attr.prebuf, device->UpdateSize*device->NumUpdates);
+            device->NumUpdates = (len+device->UpdateSize-1) / device->UpdateSize;
+        }
+    }
 
     pa_threaded_mainloop_unlock(self->loop);
     return ALC_TRUE;
@@ -1224,7 +1247,7 @@ static void ALCpulseCapture_deviceCallback(pa_context *UNUSED(context), const pa
 
 #define MATCH_INFO_NAME(iter) (al_string_cmp_cstr((iter)->device_name, info->name) == 0)
     VECTOR_FIND_IF(iter, const DevMap, CaptureDevices, MATCH_INFO_NAME);
-    if(iter != VECTOR_ITER_END(CaptureDevices)) return;
+    if(iter != VECTOR_END(CaptureDevices)) return;
 #undef MATCH_INFO_NAME
 
     AL_STRING_INIT(entry.name);
@@ -1245,7 +1268,7 @@ static void ALCpulseCapture_deviceCallback(pa_context *UNUSED(context), const pa
 
 #define MATCH_ENTRY(i) (al_string_cmp(entry.name, (i)->name) == 0)
         VECTOR_FIND_IF(iter, const DevMap, CaptureDevices, MATCH_ENTRY);
-        if(iter == VECTOR_ITER_END(CaptureDevices)) break;
+        if(iter == VECTOR_END(CaptureDevices)) break;
 #undef MATCH_ENTRY
         count++;
     }
@@ -1416,7 +1439,7 @@ static ALCenum ALCpulseCapture_open(ALCpulseCapture *self, const ALCchar *name)
 #define MATCH_NAME(iter) (al_string_cmp_cstr((iter)->name, name) == 0)
         VECTOR_FIND_IF(iter, const DevMap, CaptureDevices, MATCH_NAME);
 #undef MATCH_NAME
-        if(iter == VECTOR_ITER_END(CaptureDevices))
+        if(iter == VECTOR_END(CaptureDevices))
             return ALC_INVALID_VALUE;
         pulse_name = al_string_get_cstr(iter->device_name);
         al_string_copy(&device->DeviceName, iter->name);
