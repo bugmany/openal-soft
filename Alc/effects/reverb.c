@@ -48,7 +48,10 @@ typedef struct ALreverbState {
     DERIVE_FROM_TYPE(ALeffectState);
 
     ALboolean IsEax;
-    ALuint ExtraChannels; // For HRTF
+
+    // For HRTF and UHJ
+    ALfloat (*ExtraOut)[BUFFERSIZE];
+    ALuint ExtraChannels;
 
     // All delay lines are allocated as a single buffer to reduce memory
     // fragmentation and management code.
@@ -167,12 +170,13 @@ typedef struct ALreverbState {
 
 static ALvoid ALreverbState_Destruct(ALreverbState *State)
 {
-    free(State->SampleBuffer);
+    al_free(State->SampleBuffer);
     State->SampleBuffer = NULL;
+    ALeffectState_Destruct(STATIC_CAST(ALeffectState,State));
 }
 
 static ALboolean ALreverbState_deviceUpdate(ALreverbState *State, ALCdevice *Device);
-static ALvoid ALreverbState_update(ALreverbState *State, const ALCdevice *Device, const ALeffectslot *Slot);
+static ALvoid ALreverbState_update(ALreverbState *State, const ALCdevice *Device, const ALeffectslot *Slot, const ALeffectProps *props);
 static ALvoid ALreverbState_processStandard(ALreverbState *State, ALuint SamplesToDo, const ALfloat *restrict SamplesIn, ALfloat (*restrict SamplesOut)[BUFFERSIZE], ALuint NumChannels);
 static ALvoid ALreverbState_processEax(ALreverbState *State, ALuint SamplesToDo, const ALfloat *restrict SamplesIn, ALfloat (*restrict SamplesOut)[BUFFERSIZE], ALuint NumChannels);
 static ALvoid ALreverbState_process(ALreverbState *State, ALuint SamplesToDo, const ALfloat (*restrict SamplesIn)[BUFFERSIZE], ALfloat (*restrict SamplesOut)[BUFFERSIZE], ALuint NumChannels);
@@ -291,7 +295,6 @@ static ALboolean AllocLines(ALuint frequency, ALreverbState *State)
 {
     ALuint totalSamples, index;
     ALfloat length;
-    ALfloat *newBuffer = NULL;
 
     // All delay line lengths are calculated to accomodate the full range of
     // lengths given their respective paramters.
@@ -348,10 +351,13 @@ static ALboolean AllocLines(ALuint frequency, ALreverbState *State)
 
     if(totalSamples != State->TotalSamples)
     {
+        ALfloat *newBuffer;
+
         TRACE("New reverb buffer length: %u samples (%f sec)\n", totalSamples, totalSamples/(float)frequency);
-        newBuffer = realloc(State->SampleBuffer, sizeof(ALfloat) * totalSamples);
-        if(newBuffer == NULL)
-            return AL_FALSE;
+        newBuffer = al_calloc(16, sizeof(ALfloat) * totalSamples);
+        if(!newBuffer) return AL_FALSE;
+
+        al_free(State->SampleBuffer);
         State->SampleBuffer = newBuffer;
         State->TotalSamples = totalSamples;
     }
@@ -384,13 +390,17 @@ static ALboolean ALreverbState_deviceUpdate(ALreverbState *State, ALCdevice *Dev
     if(!AllocLines(frequency, State))
         return AL_FALSE;
 
-    /* WARNING: This assumes the real output follows the virtual output in the
-     * device's DryBuffer.
-     */
+    /* HRTF and UHJ will mix to the real output for ambient output. */
     if(Device->Hrtf || Device->Uhj_Encoder)
-        State->ExtraChannels = ChannelsFromDevFmt(Device->FmtChans);
+    {
+        State->ExtraOut = Device->RealOut.Buffer;
+        State->ExtraChannels = Device->RealOut.NumChannels;
+    }
     else
+    {
+        State->ExtraOut = NULL;
         State->ExtraChannels = 0;
+    }
 
     // Calculate the modulation filter coefficient.  Notice that the exponent
     // is calculated given the current sample rate.  This ensures that the
@@ -695,9 +705,6 @@ static ALvoid UpdateMixedPanning(const ALCdevice *Device, const ALfloat *Reflect
     /* With HRTF or UHJ, the normal output provides a panned reverb channel
      * when a non-0-length vector is specified, while the real stereo output
      * provides two other "direct" non-panned reverb channels.
-     *
-     * WARNING: This assumes the real output follows the virtual output in the
-     * device's DryBuffer.
      */
     memset(State->Early.PanGain, 0, sizeof(State->Early.PanGain));
     length = sqrtf(ReflectionsPan[0]*ReflectionsPan[0] + ReflectionsPan[1]*ReflectionsPan[1] + ReflectionsPan[2]*ReflectionsPan[2]);
@@ -709,8 +716,8 @@ static ALvoid UpdateMixedPanning(const ALCdevice *Device, const ALfloat *Reflect
     else
     {
         /* Note that EAX Reverb's panning vectors are using right-handed
-         * coordinates, rather that the OpenAL's left-handed coordinates.
-         * Negate Z to fix this.
+         * coordinates, rather than OpenAL's left-handed coordinates. Negate Z
+         * to fix this.
          */
         ALfloat pan[3] = {
              ReflectionsPan[0] / length,
@@ -772,10 +779,6 @@ static ALvoid UpdateDirectPanning(const ALCdevice *Device, const ALfloat *Reflec
     }
     else
     {
-        /* Note that EAX Reverb's panning vectors are using right-handed
-         * coordinates, rather that the OpenAL's left-handed coordinates.
-         * Negate Z to fix this.
-         */
         ALfloat pan[3] = {
              ReflectionsPan[0] / length,
              ReflectionsPan[1] / length,
@@ -825,11 +828,11 @@ static ALvoid Update3DPanning(const ALCdevice *Device, const ALfloat *Reflection
     ALfloat length;
     ALuint i;
 
-    /* 0.5 would be the gain scaling when the panning vector is 0. This also
-     * equals sqrt(1/4), a nice gain scaling for the four virtual points
+    /* sqrt(0.5) would be the gain scaling when the panning vector is 0. This
+     * also equals sqrt(2/4), a nice gain scaling for the four virtual points
      * producing an "ambient" response.
      */
-    gain[0] = gain[1] = gain[2] = gain[3] = 0.5f;
+    gain[0] = gain[1] = gain[2] = gain[3] = 0.707106781f;
     length = sqrtf(ReflectionsPan[0]*ReflectionsPan[0] + ReflectionsPan[1]*ReflectionsPan[1] + ReflectionsPan[2]*ReflectionsPan[2]);
     if(length > 1.0f)
     {
@@ -841,7 +844,7 @@ static ALvoid Update3DPanning(const ALCdevice *Device, const ALfloat *Reflection
         for(i = 0;i < 4;i++)
         {
             ALfloat dotp = pan[0]*PanDirs[i][0] + pan[1]*PanDirs[i][1] + pan[2]*PanDirs[i][2];
-            gain[i] = dotp*0.5f + 0.5f;
+            gain[i] = sqrtf(clampf(dotp*0.5f + 0.5f, 0.0f, 1.0f));
         }
     }
     else if(length > FLT_EPSILON)
@@ -850,7 +853,7 @@ static ALvoid Update3DPanning(const ALCdevice *Device, const ALfloat *Reflection
         {
             ALfloat dotp = ReflectionsPan[0]*PanDirs[i][0] + ReflectionsPan[1]*PanDirs[i][1] +
                            -ReflectionsPan[2]*PanDirs[i][2];
-            gain[i] = dotp*0.5f + 0.5f;
+            gain[i] = sqrtf(clampf(dotp*0.5f + 0.5f, 0.0f, 1.0f));
         }
     }
     for(i = 0;i < 4;i++)
@@ -860,7 +863,7 @@ static ALvoid Update3DPanning(const ALCdevice *Device, const ALfloat *Reflection
                             State->Early.PanGain[i]);
     }
 
-    gain[0] = gain[1] = gain[2] = gain[3] = 0.5f;
+    gain[0] = gain[1] = gain[2] = gain[3] = 0.707106781f;
     length = sqrtf(LateReverbPan[0]*LateReverbPan[0] + LateReverbPan[1]*LateReverbPan[1] + LateReverbPan[2]*LateReverbPan[2]);
     if(length > 1.0f)
     {
@@ -872,7 +875,7 @@ static ALvoid Update3DPanning(const ALCdevice *Device, const ALfloat *Reflection
         for(i = 0;i < 4;i++)
         {
             ALfloat dotp = pan[0]*PanDirs[i][0] + pan[1]*PanDirs[i][1] + pan[2]*PanDirs[i][2];
-            gain[i] = dotp*0.5f + 0.5f;
+            gain[i] = sqrtf(clampf(dotp*0.5f + 0.5f, 0.0f, 1.0f));
         }
     }
     else if(length > FLT_EPSILON)
@@ -881,7 +884,7 @@ static ALvoid Update3DPanning(const ALCdevice *Device, const ALfloat *Reflection
         {
             ALfloat dotp = LateReverbPan[0]*PanDirs[i][0] + LateReverbPan[1]*PanDirs[i][1] +
                            -LateReverbPan[2]*PanDirs[i][2];
-            gain[i] = dotp*0.5f + 0.5f;
+            gain[i] = sqrtf(clampf(dotp*0.5f + 0.5f, 0.0f, 1.0f));
         }
     }
     for(i = 0;i < 4;i++)
@@ -892,17 +895,16 @@ static ALvoid Update3DPanning(const ALCdevice *Device, const ALfloat *Reflection
     }
 }
 
-static ALvoid ALreverbState_update(ALreverbState *State, const ALCdevice *Device, const ALeffectslot *Slot)
+static ALvoid ALreverbState_update(ALreverbState *State, const ALCdevice *Device, const ALeffectslot *Slot, const ALeffectProps *props)
 {
-    const ALeffectProps *props = &Slot->EffectProps;
     ALuint frequency = Device->Frequency;
     ALfloat lfscale, hfscale, hfRatio;
     ALfloat gain, gainlf, gainhf;
     ALfloat cw, x, y;
 
-    if(Slot->EffectType == AL_EFFECT_EAXREVERB && !EmulateEAXReverb)
+    if(Slot->Params.EffectType == AL_EFFECT_EAXREVERB && !EmulateEAXReverb)
         State->IsEax = AL_TRUE;
-    else if(Slot->EffectType == AL_EFFECT_REVERB || EmulateEAXReverb)
+    else if(Slot->Params.EffectType == AL_EFFECT_REVERB || EmulateEAXReverb)
         State->IsEax = AL_FALSE;
 
     // Calculate the master filters
@@ -952,14 +954,15 @@ static ALvoid ALreverbState_update(ALreverbState *State, const ALCdevice *Device
                    props->Reverb.Diffusion, props->Reverb.EchoDepth,
                    hfRatio, cw, frequency, State);
 
-    gain = props->Reverb.Gain * Slot->Gain * ReverbBoost;
+    gain = props->Reverb.Gain * Slot->Params.Gain * ReverbBoost;
     // Update early and late 3D panning.
     if(Device->Hrtf || Device->Uhj_Encoder)
         UpdateMixedPanning(Device, props->Reverb.ReflectionsPan,
                            props->Reverb.LateReverbPan, gain,
                            props->Reverb.ReflectionsGain,
                            props->Reverb.LateReverbGain, State);
-    else if(Device->FmtChans == DevFmtBFormat3D || Device->AmbiDecoder)
+    else if(Device->AmbiDecoder || (Device->FmtChans >= DevFmtAmbi1 &&
+                                    Device->FmtChans <= DevFmtAmbi3))
         Update3DPanning(Device, props->Reverb.ReflectionsPan,
                         props->Reverb.LateReverbPan, gain,
                         props->Reverb.ReflectionsGain,
@@ -1251,15 +1254,14 @@ static inline ALvoid EAXEcho(ALreverbState *State, ALuint todo, ALfloat (*restri
 
 // Perform the non-EAX reverb pass on a given input sample, resulting in
 // four-channel output.
-static inline ALvoid VerbPass(ALreverbState *State, ALuint todo, const ALfloat *in, ALfloat (*restrict early)[4], ALfloat (*restrict late)[4])
+static inline ALvoid VerbPass(ALreverbState *State, ALuint todo, const ALfloat *input, ALfloat (*restrict early)[4], ALfloat (*restrict late)[4])
 {
     ALuint i;
 
-    // Low-pass filter the incoming samples.
+    // Low-pass filter the incoming samples (use the early buffer as temp storage).
+    ALfilterState_process(&State->LpFilter, &early[0][0], input, todo);
     for(i = 0;i < todo;i++)
-        DelayLineIn(&State->Delay, State->Offset+i,
-            ALfilterState_processSingle(&State->LpFilter, in[i])
-        );
+        DelayLineIn(&State->Delay, State->Offset+i, early[i>>2][i&3]);
 
     // Calculate the early reflection from the first delay tap.
     EarlyReflection(State, todo, early);
@@ -1277,12 +1279,13 @@ static inline ALvoid EAXVerbPass(ALreverbState *State, ALuint todo, const ALfloa
 {
     ALuint i;
 
-    // Band-pass and modulate the incoming samples.
+    // Band-pass and modulate the incoming samples (use the early buffer as temp storage).
+    ALfilterState_process(&State->LpFilter, &early[0][0], input, todo);
+    ALfilterState_process(&State->HpFilter, &early[MAX_UPDATE_SAMPLES/4][0], &early[0][0], todo);
+
     for(i = 0;i < todo;i++)
     {
-        ALfloat sample = input[i];
-        sample = ALfilterState_processSingle(&State->LpFilter, sample);
-        sample = ALfilterState_processSingle(&State->HpFilter, sample);
+        ALfloat sample = early[(MAX_UPDATE_SAMPLES/4)+(i>>2)][i&3];
 
         // Perform any modulation on the input.
         sample = EAXModulation(State, State->Offset+i, sample);
@@ -1335,6 +1338,21 @@ static ALvoid ALreverbState_processStandard(ALreverbState *State, ALuint Samples
                         SamplesOut[c][index+i] += gain*late[i][l];
                 }
             }
+            for(c = 0;c < State->ExtraChannels;c++)
+            {
+                gain = State->Early.PanGain[l][NumChannels+c];
+                if(fabsf(gain) > GAIN_SILENCE_THRESHOLD)
+                {
+                    for(i = 0;i < todo;i++)
+                        State->ExtraOut[c][index+i] += gain*early[i][l];
+                }
+                gain = State->Late.PanGain[l][NumChannels+c];
+                if(fabsf(gain) > GAIN_SILENCE_THRESHOLD)
+                {
+                    for(i = 0;i < todo;i++)
+                        State->ExtraOut[c][index+i] += gain*late[i][l];
+                }
+            }
         }
 
         index += todo;
@@ -1372,6 +1390,21 @@ static ALvoid ALreverbState_processEax(ALreverbState *State, ALuint SamplesToDo,
                         SamplesOut[c][index+i] += gain*late[i][l];
                 }
             }
+            for(c = 0;c < State->ExtraChannels;c++)
+            {
+                gain = State->Early.PanGain[l][NumChannels+c];
+                if(fabsf(gain) > GAIN_SILENCE_THRESHOLD)
+                {
+                    for(i = 0;i < todo;i++)
+                        State->ExtraOut[c][index+i] += gain*early[i][l];
+                }
+                gain = State->Late.PanGain[l][NumChannels+c];
+                if(fabsf(gain) > GAIN_SILENCE_THRESHOLD)
+                {
+                    for(i = 0;i < todo;i++)
+                        State->ExtraOut[c][index+i] += gain*late[i][l];
+                }
+            }
         }
 
         index += todo;
@@ -1380,7 +1413,6 @@ static ALvoid ALreverbState_processEax(ALreverbState *State, ALuint SamplesToDo,
 
 static ALvoid ALreverbState_process(ALreverbState *State, ALuint SamplesToDo, const ALfloat (*restrict SamplesIn)[BUFFERSIZE], ALfloat (*restrict SamplesOut)[BUFFERSIZE], ALuint NumChannels)
 {
-    NumChannels += State->ExtraChannels;
     if(State->IsEax)
         ALreverbState_processEax(State, SamplesToDo, SamplesIn[0], SamplesOut, NumChannels);
     else
@@ -1651,20 +1683,16 @@ void ALeaxreverb_setParamfv(ALeffect *effect, ALCcontext *context, ALenum param,
         case AL_EAXREVERB_REFLECTIONS_PAN:
             if(!(isfinite(vals[0]) && isfinite(vals[1]) && isfinite(vals[2])))
                 SET_ERROR_AND_RETURN(context, AL_INVALID_VALUE);
-            LockContext(context);
             props->Reverb.ReflectionsPan[0] = vals[0];
             props->Reverb.ReflectionsPan[1] = vals[1];
             props->Reverb.ReflectionsPan[2] = vals[2];
-            UnlockContext(context);
             break;
         case AL_EAXREVERB_LATE_REVERB_PAN:
             if(!(isfinite(vals[0]) && isfinite(vals[1]) && isfinite(vals[2])))
                 SET_ERROR_AND_RETURN(context, AL_INVALID_VALUE);
-            LockContext(context);
             props->Reverb.LateReverbPan[0] = vals[0];
             props->Reverb.LateReverbPan[1] = vals[1];
             props->Reverb.LateReverbPan[2] = vals[2];
-            UnlockContext(context);
             break;
 
         default:
@@ -1785,18 +1813,14 @@ void ALeaxreverb_getParamfv(const ALeffect *effect, ALCcontext *context, ALenum 
     switch(param)
     {
         case AL_EAXREVERB_REFLECTIONS_PAN:
-            LockContext(context);
             vals[0] = props->Reverb.ReflectionsPan[0];
             vals[1] = props->Reverb.ReflectionsPan[1];
             vals[2] = props->Reverb.ReflectionsPan[2];
-            UnlockContext(context);
             break;
         case AL_EAXREVERB_LATE_REVERB_PAN:
-            LockContext(context);
             vals[0] = props->Reverb.LateReverbPan[0];
             vals[1] = props->Reverb.LateReverbPan[1];
             vals[2] = props->Reverb.LateReverbPan[2];
-            UnlockContext(context);
             break;
 
         default:

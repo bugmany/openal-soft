@@ -87,8 +87,9 @@ typedef struct ALequalizerState {
     ALfloat SampleBuffer[4][MAX_EFFECT_CHANNELS][MAX_UPDATE_SAMPLES];
 } ALequalizerState;
 
-static ALvoid ALequalizerState_Destruct(ALequalizerState *UNUSED(state))
+static ALvoid ALequalizerState_Destruct(ALequalizerState *state)
 {
+    ALeffectState_Destruct(STATIC_CAST(ALeffectState,state));
 }
 
 static ALboolean ALequalizerState_deviceUpdate(ALequalizerState *UNUSED(state), ALCdevice *UNUSED(device))
@@ -96,7 +97,7 @@ static ALboolean ALequalizerState_deviceUpdate(ALequalizerState *UNUSED(state), 
     return AL_TRUE;
 }
 
-static ALvoid ALequalizerState_update(ALequalizerState *state, const ALCdevice *device, const ALeffectslot *slot)
+static ALvoid ALequalizerState_update(ALequalizerState *state, const ALCdevice *device, const ALeffectslot *slot, const ALeffectProps *props)
 {
     ALfloat frequency = (ALfloat)device->Frequency;
     ALfloat gain, freq_mult;
@@ -113,15 +114,15 @@ static ALvoid ALequalizerState_update(ALequalizerState *state, const ALCdevice *
     STATIC_CAST(ALeffectState,state)->OutBuffer = device->FOAOut.Buffer;
     STATIC_CAST(ALeffectState,state)->OutChannels = device->FOAOut.NumChannels;
     for(i = 0;i < MAX_EFFECT_CHANNELS;i++)
-        ComputeFirstOrderGains(device->FOAOut, matrix.m[i], slot->Gain,
+        ComputeFirstOrderGains(device->FOAOut, matrix.m[i], slot->Params.Gain,
                                state->Gain[i]);
 
     /* Calculate coefficients for the each type of filter. Note that the shelf
      * filters' gain is for the reference frequency, which is the centerpoint
      * of the transition band.
      */
-    gain = sqrtf(slot->EffectProps.Equalizer.LowGain);
-    freq_mult = slot->EffectProps.Equalizer.LowCutoff/frequency;
+    gain = sqrtf(props->Equalizer.LowGain);
+    freq_mult = props->Equalizer.LowCutoff/frequency;
     ALfilterState_setParams(&state->filter[0][0], ALfilterType_LowShelf,
         gain, freq_mult, calc_rcpQ_from_slope(gain, 0.75f)
     );
@@ -130,44 +131,48 @@ static ALvoid ALequalizerState_update(ALequalizerState *state, const ALCdevice *
     {
         state->filter[0][i].a1 = state->filter[0][0].a1;
         state->filter[0][i].a2 = state->filter[0][0].a2;
+        state->filter[0][i].b0 = state->filter[0][0].b0;
         state->filter[0][i].b1 = state->filter[0][0].b1;
         state->filter[0][i].b2 = state->filter[0][0].b2;
-        state->filter[0][i].input_gain = state->filter[0][0].input_gain;
         state->filter[0][i].process = state->filter[0][0].process;
     }
 
-    gain = slot->EffectProps.Equalizer.Mid1Gain;
-    freq_mult = slot->EffectProps.Equalizer.Mid1Center/frequency;
+    gain = props->Equalizer.Mid1Gain;
+    freq_mult = props->Equalizer.Mid1Center/frequency;
     ALfilterState_setParams(&state->filter[1][0], ALfilterType_Peaking,
-        gain, freq_mult, calc_rcpQ_from_bandwidth(freq_mult, slot->EffectProps.Equalizer.Mid1Width)
+        gain, freq_mult, calc_rcpQ_from_bandwidth(
+            freq_mult, props->Equalizer.Mid1Width
+        )
     );
     for(i = 1;i < MAX_EFFECT_CHANNELS;i++)
     {
         state->filter[1][i].a1 = state->filter[1][0].a1;
         state->filter[1][i].a2 = state->filter[1][0].a2;
+        state->filter[1][i].b0 = state->filter[1][0].b0;
         state->filter[1][i].b1 = state->filter[1][0].b1;
         state->filter[1][i].b2 = state->filter[1][0].b2;
-        state->filter[1][i].input_gain = state->filter[1][0].input_gain;
         state->filter[1][i].process = state->filter[1][0].process;
     }
 
-    gain = slot->EffectProps.Equalizer.Mid2Gain;
-    freq_mult = slot->EffectProps.Equalizer.Mid2Center/frequency;
+    gain = props->Equalizer.Mid2Gain;
+    freq_mult = props->Equalizer.Mid2Center/frequency;
     ALfilterState_setParams(&state->filter[2][0], ALfilterType_Peaking,
-        gain, freq_mult, calc_rcpQ_from_bandwidth(freq_mult, slot->EffectProps.Equalizer.Mid2Width)
+        gain, freq_mult, calc_rcpQ_from_bandwidth(
+            freq_mult, props->Equalizer.Mid2Width
+        )
     );
     for(i = 1;i < MAX_EFFECT_CHANNELS;i++)
     {
         state->filter[2][i].a1 = state->filter[2][0].a1;
         state->filter[2][i].a2 = state->filter[2][0].a2;
+        state->filter[2][i].b0 = state->filter[2][0].b0;
         state->filter[2][i].b1 = state->filter[2][0].b1;
         state->filter[2][i].b2 = state->filter[2][0].b2;
-        state->filter[2][i].input_gain = state->filter[2][0].input_gain;
         state->filter[2][i].process = state->filter[2][0].process;
     }
 
-    gain = sqrtf(slot->EffectProps.Equalizer.HighGain);
-    freq_mult = slot->EffectProps.Equalizer.HighCutoff/frequency;
+    gain = sqrtf(props->Equalizer.HighGain);
+    freq_mult = props->Equalizer.HighCutoff/frequency;
     ALfilterState_setParams(&state->filter[3][0], ALfilterType_HighShelf,
         gain, freq_mult, calc_rcpQ_from_slope(gain, 0.75f)
     );
@@ -175,9 +180,9 @@ static ALvoid ALequalizerState_update(ALequalizerState *state, const ALCdevice *
     {
         state->filter[3][i].a1 = state->filter[3][0].a1;
         state->filter[3][i].a2 = state->filter[3][0].a2;
+        state->filter[3][i].b0 = state->filter[3][0].b0;
         state->filter[3][i].b1 = state->filter[3][0].b1;
         state->filter[3][i].b2 = state->filter[3][0].b2;
-        state->filter[3][i].input_gain = state->filter[3][0].input_gain;
         state->filter[3][i].process = state->filter[3][0].process;
     }
 }

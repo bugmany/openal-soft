@@ -37,6 +37,7 @@
 #include "vector.h"
 #include "alstring.h"
 #include "almalloc.h"
+#include "threads.h"
 
 #include "hrtf.h"
 
@@ -45,6 +46,8 @@
 typedef int64_t ALCint64SOFT;
 typedef uint64_t ALCuint64SOFT;
 #define ALC_DEVICE_CLOCK_SOFT                    0x1600
+#define ALC_DEVICE_LATENCY_SOFT                  0x1601
+#define ALC_DEVICE_CLOCK_LATENCY_SOFT            0x1602
 typedef void (ALC_APIENTRY*LPALCGETINTEGER64VSOFT)(ALCdevice *device, ALCenum pname, ALsizei size, ALCint64SOFT *values);
 #ifdef AL_ALEXT_PROTOTYPES
 ALC_API void ALC_APIENTRY alcGetInteger64vSOFT(ALCdevice *device, ALCenum pname, ALsizei size, ALCint64SOFT *values);
@@ -444,7 +447,10 @@ enum DevFmtChannels {
     /* Similar to 5.1, except using rear channels instead of sides */
     DevFmtX51Rear = 0x80000000,
 
-    DevFmtBFormat3D,
+    /* Ambisonic formats should be kept together */
+    DevFmtAmbi1,
+    DevFmtAmbi2,
+    DevFmtAmbi3,
 
     DevFmtChannelsDefault = DevFmtStereo
 };
@@ -456,6 +462,14 @@ inline ALuint FrameSizeFromDevFmt(enum DevFmtChannels chans, enum DevFmtType typ
 {
     return ChannelsFromDevFmt(chans) * BytesFromDevFmt(type);
 }
+
+enum AmbiFormat {
+    AmbiFormat_FuMa,     /* FuMa channel order and normalization */
+    AmbiFormat_ACN_SN3D, /* ACN channel order and SN3D normalization */
+    AmbiFormat_ACN_N3D,  /* ACN channel order and N3D normalization */
+
+    AmbiFormat_Default = AmbiFormat_ACN_SN3D
+};
 
 
 extern const struct EffectList {
@@ -482,15 +496,38 @@ enum RenderMode {
 
 /* The maximum number of Ambisonics coefficients. For a given order (o), the
  * size needed will be (o+1)**2, thus zero-order has 1, first-order has 4,
- * second-order has 9, and third-order has 16. */
+ * second-order has 9, third-order has 16, and fourth-order has 25.
+ */
 #define MAX_AMBI_ORDER  3
 #define MAX_AMBI_COEFFS ((MAX_AMBI_ORDER+1) * (MAX_AMBI_ORDER+1))
+
+/* A bitmask of ambisonic channels with height information. If none of these
+ * channels are used/needed, there's no height (e.g. with most surround sound
+ * speaker setups). This only specifies up to 4th order, which is the highest
+ * order a 32-bit mask value can specify (a 64-bit mask could handle up to 7th
+ * order). This is ACN ordering, with bit 0 being ACN 0, etc.
+ */
+#define AMBI_PERIPHONIC_MASK (0xfe7ce4)
+
+/* The maximum number of Ambisonic coefficients for 2D (non-periphonic)
+ * representation. This is 2 per each order above zero-order, plus 1 for zero-
+ * order. Or simply, o*2 + 1.
+ */
+#define MAX_AMBI2D_COEFFS (MAX_AMBI_ORDER*2 + 1)
+
 
 typedef ALfloat ChannelConfig[MAX_AMBI_COEFFS];
 typedef struct BFChannelConfig {
     ALfloat Scale;
     ALuint Index;
 } BFChannelConfig;
+
+typedef union AmbiConfig {
+    /* Ambisonic coefficients for mixing to the dry buffer. */
+    ChannelConfig Coeffs[MAX_OUTPUT_CHANNELS];
+    /* Coefficient channel mapping for mixing to the dry buffer. */
+    BFChannelConfig Map[MAX_OUTPUT_CHANNELS];
+} AmbiConfig;
 
 
 #define HRTF_HISTORY_BITS   (6)
@@ -528,13 +565,17 @@ struct ALCdevice_struct
     enum DevFmtChannels FmtChans;
     enum DevFmtType     FmtType;
     ALboolean IsHeadphones;
+    /* For DevFmtAmbi* output only, specifies the channel order and
+     * normalization.
+     */
+    enum AmbiFormat AmbiFmt;
 
     al_string DeviceName;
 
     ATOMIC(ALCenum) LastError;
 
     // Maximum number of sources that can be created
-    ALuint MaxNoOfSources;
+    ALuint SourcesMax;
     // Maximum number of slots that can be created
     ALuint AuxiliaryEffectSlotMax;
 
@@ -558,8 +599,8 @@ struct ALCdevice_struct
     ALCenum Hrtf_Status;
 
     /* HRTF filter state for dry buffer content */
-    HrtfState Hrtf_State[MAX_OUTPUT_CHANNELS];
-    HrtfParams Hrtf_Params[MAX_OUTPUT_CHANNELS];
+    HrtfState Hrtf_State[8];
+    HrtfParams Hrtf_Params[8];
     ALuint Hrtf_Offset;
 
     /* UHJ encoder state */
@@ -568,8 +609,11 @@ struct ALCdevice_struct
     /* High quality Ambisonic decoder */
     struct BFormatDec *AmbiDecoder;
 
-    // Stereo-to-binaural filter
+    /* Stereo-to-binaural filter */
     struct bs2b *Bs2b;
+
+    /* First-order ambisonic upsampler for higher-order output */
+    struct AmbiUpsampler *AmbiUp;
 
     /* Rendering mode. */
     enum RenderMode Render_Mode;
@@ -587,28 +631,20 @@ struct ALCdevice_struct
 
     /* The "dry" path corresponds to the main output. */
     struct {
-        union {
-            /* Ambisonic coefficients for mixing to the dry buffer. */
-            ChannelConfig Coeffs[MAX_OUTPUT_CHANNELS];
-            /* Coefficient channel mapping for mixing to the dry buffer. */
-            BFChannelConfig Map[MAX_OUTPUT_CHANNELS];
-        } Ambi;
-        /* Number of coefficients in each ChannelConfig to mix together (4 for
-         * first-order, 9 for second-order, etc).
+        AmbiConfig Ambi;
+        /* Number of coefficients in each Ambi.Coeffs to mix together (4 for
+         * first-order, 9 for second-order, etc). If the count is 0, Ambi.Map
+         * is used instead to map each output to a coefficient index.
          */
         ALuint CoeffCount;
 
-        /* Dry buffer will be aliased by the virtual or real output. */
         ALfloat (*Buffer)[BUFFERSIZE];
         ALuint NumChannels;
     } Dry;
 
     /* First-order ambisonics output, to be upsampled to the dry buffer if different. */
     struct {
-        union {
-            ChannelConfig Coeffs[MAX_OUTPUT_CHANNELS];
-            BFChannelConfig Map[MAX_OUTPUT_CHANNELS];
-        } Ambi;
+        AmbiConfig Ambi;
         /* Will only be 4 or 0. */
         ALuint CoeffCount;
 
@@ -616,12 +652,9 @@ struct ALCdevice_struct
         ALuint NumChannels;
     } FOAOut;
 
-    /* Virtual output, to be post-processed to the real output. */
-    struct {
-        ALfloat (*Buffer)[BUFFERSIZE];
-        ALuint NumChannels;
-    } VirtOut;
-    /* "Real" output, which will be written to the device buffer. */
+    /* "Real" output, which will be written to the device buffer. May alias the
+     * dry buffer.
+     */
     struct {
         enum Channel ChannelName[MAX_OUTPUT_CHANNELS];
 
@@ -642,6 +675,7 @@ struct ALCdevice_struct
     // Contexts created on this device
     ATOMIC(ALCcontext*) ContextList;
 
+    almtx_t BackendLock;
     struct ALCbackend *Backend;
 
     void *ExtraData; // For the backend's use
@@ -677,8 +711,7 @@ struct ALCdevice_struct
 #define RECORD_THREAD_NAME "alsoft-record"
 
 
-struct ALCcontext_struct
-{
+struct ALCcontext_struct {
     RefCount ref;
 
     struct ALlistener *Listener;
@@ -688,21 +721,27 @@ struct ALCcontext_struct
 
     ATOMIC(ALenum) LastError;
 
-    ATOMIC(ALenum) UpdateSources;
-
     volatile enum DistanceModel DistanceModel;
     volatile ALboolean SourceDistanceModel;
 
     volatile ALfloat DopplerFactor;
     volatile ALfloat DopplerVelocity;
     volatile ALfloat SpeedOfSound;
-    volatile ALenum  DeferUpdates;
+    ATOMIC(ALenum) DeferUpdates;
+
+    RWLock PropLock;
+
+    /* Counter for the pre-mixing updates, in 31.1 fixed point (lowest bit
+     * indicates if updates are currently happening).
+     */
+    RefCount UpdateCount;
+    ATOMIC(ALenum) HoldUpdates;
 
     struct ALvoice *Voices;
     ALsizei VoiceCount;
     ALsizei MaxVoices;
 
-    VECTOR(struct ALeffectslot*) ActiveAuxSlots;
+    ATOMIC(struct ALeffectslot*) ActiveAuxSlotList;
 
     ALCdevice  *Device;
     const ALCchar *ExtensionList;

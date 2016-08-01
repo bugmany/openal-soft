@@ -80,6 +80,7 @@ typedef struct ALbuffer {
 
     enum FmtChannels FmtChannels;
     enum FmtType     FmtType;
+    ALuint BytesAlloc;
 
     enum UserFmtChannels OriginalChannels;
     enum UserFmtType     OriginalType;
@@ -106,10 +107,19 @@ void DeleteBuffer(ALCdevice *device, ALbuffer *buffer);
 
 ALenum LoadData(ALbuffer *buffer, ALuint freq, ALenum NewFormat, ALsizei frames, enum UserFmtChannels SrcChannels, enum UserFmtType SrcType, const ALvoid *data, ALsizei align, ALboolean storesrc);
 
+inline void LockBuffersRead(ALCdevice *device)
+{ LockUIntMapRead(&device->BufferMap); }
+inline void UnlockBuffersRead(ALCdevice *device)
+{ UnlockUIntMapRead(&device->BufferMap); }
+inline void LockBuffersWrite(ALCdevice *device)
+{ LockUIntMapWrite(&device->BufferMap); }
+inline void UnlockBuffersWrite(ALCdevice *device)
+{ UnlockUIntMapWrite(&device->BufferMap); }
+
 inline struct ALbuffer *LookupBuffer(ALCdevice *device, ALuint id)
-{ return (struct ALbuffer*)LookupUIntMapKey(&device->BufferMap, id); }
+{ return (struct ALbuffer*)LookupUIntMapKeyNoLock(&device->BufferMap, id); }
 inline struct ALbuffer *RemoveBuffer(ALCdevice *device, ALuint id)
-{ return (struct ALbuffer*)RemoveUIntMapKey(&device->BufferMap, id); }
+{ return (struct ALbuffer*)RemoveUIntMapKeyNoLock(&device->BufferMap, id); }
 
 ALvoid ReleaseALBuffers(ALCdevice *device);
 

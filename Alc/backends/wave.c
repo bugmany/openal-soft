@@ -91,7 +91,7 @@ static ALCboolean ALCwaveBackend_start(ALCwaveBackend *self);
 static void ALCwaveBackend_stop(ALCwaveBackend *self);
 static DECLARE_FORWARD2(ALCwaveBackend, ALCbackend, ALCenum, captureSamples, void*, ALCuint)
 static DECLARE_FORWARD(ALCwaveBackend, ALCbackend, ALCuint, availableSamples)
-static DECLARE_FORWARD(ALCwaveBackend, ALCbackend, ALint64, getLatency)
+static DECLARE_FORWARD(ALCwaveBackend, ALCbackend, ClockLatency, getClockLatency)
 static DECLARE_FORWARD(ALCwaveBackend, ALCbackend, void, lock)
 static DECLARE_FORWARD(ALCwaveBackend, ALCbackend, void, unlock)
 DECLARE_DEFAULT_ALLOCATORS(ALCwaveBackend)
@@ -249,7 +249,7 @@ static ALCboolean ALCwaveBackend_reset(ALCwaveBackend *self)
     clearerr(self->mFile);
 
     if(GetConfigValueBool(NULL, "wave", "bformat", 0))
-        device->FmtChans = DevFmtBFormat3D;
+        device->FmtChans = DevFmtAmbi1;
 
     switch(device->FmtType)
     {
@@ -277,7 +277,11 @@ static ALCboolean ALCwaveBackend_reset(ALCwaveBackend *self)
         case DevFmtX51Rear: chanmask = 0x01 | 0x02 | 0x04 | 0x08 | 0x010 | 0x020; break;
         case DevFmtX61: chanmask = 0x01 | 0x02 | 0x04 | 0x08 | 0x100 | 0x200 | 0x400; break;
         case DevFmtX71: chanmask = 0x01 | 0x02 | 0x04 | 0x08 | 0x010 | 0x020 | 0x200 | 0x400; break;
-        case DevFmtBFormat3D:
+        case DevFmtAmbi1:
+        case DevFmtAmbi2:
+        case DevFmtAmbi3:
+            /* .amb output requires FuMa */
+            device->AmbiFmt = AmbiFormat_FuMa;
             isbformat = 1;
             chanmask = 0;
             break;

@@ -63,6 +63,10 @@ static const ALuint FuMa2ACN[MAX_AMBI_COEFFS] = {
     15, /* P */
     9,  /* Q */
 };
+static const ALuint ACN2ACN[MAX_AMBI_COEFFS] = {
+    0,  1,  2,  3,  4,  5,  6,  7,
+    8,  9, 10, 11, 12, 13, 14, 15
+};
 
 /* NOTE: These are scale factors as applied to Ambisonics content. Decoder
  * coefficients should be divided by these values to get proper N3D scalings.
@@ -143,17 +147,26 @@ void CalcDirectionCoeffs(const ALfloat dir[3], ALfloat spread, ALfloat coeffs[MA
          * angle spread. See:
          * http://www.ppsloan.org/publications/StupidSH36.pdf - Appendix A3
          *
+         * When adjusted for N3D normalization instead of SN3D, these
+         * calculations are:
+         *
+         * ZH0 = -sqrt(pi) * (-1+ca);
+         * ZH1 =  0.5*sqrt(pi) * sa*sa;
+         * ZH2 = -0.5*sqrt(pi) * ca*(-1+ca)*(ca+1);
+         * ZH3 = -0.125*sqrt(pi) * (-1+ca)*(ca+1)*(5*ca*ca - 1);
+         * ZH4 = -0.125*sqrt(pi) * ca*(-1+ca)*(ca+1)*(7*ca*ca - 3);
+         * ZH5 = -0.0625*sqrt(pi) * (-1+ca)*(ca+1)*(21*ca*ca*ca*ca - 14*ca*ca + 1);
+         *
          * The gain of the source is compensated for size, so that the
-         * loundness doesn't depend on the spread.
+         * loundness doesn't depend on the spread. That is, the factors are
+         * scaled so that ZH0 remains 1 regardless of the spread. Thus:
          *
-         * ZH0 = (-sqrt_pi * (-1.f + ca));
-         * ZH1 = ( 0.5f*sqrtf(3.f)*sqrt_pi * sa*sa);
-         * ZH2 = (-0.5f*sqrtf(5.f)*sqrt_pi * ca*(-1.f+ca)*(ca+1.f));
-         * ZH3 = (-0.125f*sqrtf(7.f)*sqrt_pi * (-1.f+ca)*(ca+1.f)*(5.f*ca*ca-1.f));
-         * solidangle = 2.f*F_PI*(1.f-ca)
-         * size_normalisation_coef = 1.f/ZH0;
-         *
-         * This is then adjusted for N3D normalization over SN3D.
+         * ZH0 = 1.0f;
+         * ZH1 = 0.5f * (ca+1.0f);
+         * ZH2 = 0.5f * (ca+1.0f)*ca;
+         * ZH3 = 0.125f * (ca+1.0f)*(5.0f*ca*ca - 1.0f);
+         * ZH4 = 0.125f * (ca+1.0f)*(7.0f*ca*ca - 3.0f)*ca;
+         * ZH5 = 0.0625f * (ca+1.0f)*(21.0f*ca*ca*ca*ca - 14.0f*ca*ca + 1.0f);
          */
         ALfloat ca = cosf(spread * 0.5f);
 
@@ -437,9 +450,17 @@ static bool MakeSpeakerMap(ALCdevice *device, const AmbDecConf *conf, ALuint spe
             c = GetChannelIdxByName(device->RealOut, BackCenter);
         else
         {
-            ERR("AmbDec speaker label \"%s\" not recognized\n",
-                al_string_get_cstr(conf->Speakers[i].Name));
-            return false;
+            const char *name = al_string_get_cstr(conf->Speakers[i].Name);
+            unsigned int n;
+            char ch;
+
+            if(sscanf(name, "AUX%u%c", &n, &ch) == 1 && n < 16)
+                c = GetChannelIdxByName(device->RealOut, Aux0+n);
+            else
+            {
+                ERR("AmbDec speaker label \"%s\" not recognized\n", name);
+                return false;
+            }
         }
         if(c == -1)
         {
@@ -464,10 +485,10 @@ static const ChannelMap MonoCfg[1] = {
     { FrontLeft,   { 0.707106781f, 0.0f,  0.5f, 0.0f } },
     { FrontRight,  { 0.707106781f, 0.0f, -0.5f, 0.0f } },
 }, QuadCfg[4] = {
-    { FrontLeft,   { 0.353553f,  0.306184f,  0.306184f, 0.0f,  0.0f, 0.0f, 0.0f,  0.000000f,  0.117186f } },
-    { FrontRight,  { 0.353553f,  0.306184f, -0.306184f, 0.0f,  0.0f, 0.0f, 0.0f,  0.000000f, -0.117186f } },
-    { BackLeft,    { 0.353553f, -0.306184f,  0.306184f, 0.0f,  0.0f, 0.0f, 0.0f,  0.000000f, -0.117186f } },
-    { BackRight,   { 0.353553f, -0.306184f, -0.306184f, 0.0f,  0.0f, 0.0f, 0.0f,  0.000000f,  0.117186f } },
+    { FrontLeft,   { 0.353553f,  0.306186f,  0.306186f, 0.0f,  0.0f, 0.0f, 0.0f,  0.000000f,  0.125000f } },
+    { FrontRight,  { 0.353553f,  0.306186f, -0.306186f, 0.0f,  0.0f, 0.0f, 0.0f,  0.000000f, -0.125000f } },
+    { BackLeft,    { 0.353553f, -0.306186f,  0.306186f, 0.0f,  0.0f, 0.0f, 0.0f,  0.000000f, -0.125000f } },
+    { BackRight,   { 0.353553f, -0.306186f, -0.306186f, 0.0f,  0.0f, 0.0f, 0.0f,  0.000000f,  0.125000f } },
 }, X51SideCfg[5] = {
     { FrontLeft,   { 0.208954f,  0.199518f,  0.223424f, 0.0f,  0.0f, 0.0f, 0.0f, -0.012543f,  0.144260f } },
     { FrontRight,  { 0.208950f,  0.199514f, -0.223425f, 0.0f,  0.0f, 0.0f, 0.0f, -0.012544f, -0.144258f } },
@@ -557,24 +578,51 @@ static void InitPanning(ALCdevice *device)
             coeffcount = 16;
             break;
 
-        case DevFmtBFormat3D:
+        case DevFmtAmbi1:
+        case DevFmtAmbi2:
+        case DevFmtAmbi3:
             break;
     }
 
-    if(device->FmtChans == DevFmtBFormat3D)
+    if(device->FmtChans >= DevFmtAmbi1 && device->FmtChans <= DevFmtAmbi3)
     {
-        count = 4;
+        const ALuint *acnmap = (device->AmbiFmt == AmbiFormat_FuMa) ? FuMa2ACN : ACN2ACN;
+        const ALfloat *n3dcale = (device->AmbiFmt == AmbiFormat_FuMa) ? FuMa2N3DScale :
+                                 (device->AmbiFmt == AmbiFormat_ACN_SN3D) ? SN3D2N3DScale :
+                                 /*(device->AmbiFmt == AmbiFormat_ACN_N3D) ?*/ UnitScale;
+
+        count = (device->FmtChans == DevFmtAmbi3) ? 16 :
+                (device->FmtChans == DevFmtAmbi2) ? 9 :
+                (device->FmtChans == DevFmtAmbi1) ? 4 : 1;
         for(i = 0;i < count;i++)
         {
-            ALuint acn = FuMa2ACN[i];
-            device->Dry.Ambi.Map[i].Scale = 1.0f/FuMa2N3DScale[acn];
+            ALuint acn = acnmap[i];
+            device->Dry.Ambi.Map[i].Scale = 1.0f/n3dcale[acn];
             device->Dry.Ambi.Map[i].Index = acn;
         }
         device->Dry.CoeffCount = 0;
         device->Dry.NumChannels = count;
 
-        memcpy(&device->FOAOut.Ambi, &device->Dry.Ambi, sizeof(device->FOAOut.Ambi));
-        device->FOAOut.CoeffCount = device->Dry.CoeffCount;
+        if(device->FmtChans == DevFmtAmbi1)
+        {
+            device->FOAOut.Ambi = device->Dry.Ambi;
+            device->FOAOut.CoeffCount = device->Dry.CoeffCount;
+        }
+        else
+        {
+            /* FOA output is always ACN+N3D for higher-order ambisonic output.
+             * The upsampler expects this and will convert it for output.
+             */
+            memset(&device->FOAOut.Ambi, 0, sizeof(device->FOAOut.Ambi));
+            for(i = 0;i < 4;i++)
+            {
+                device->FOAOut.Ambi.Map[i].Scale = 1.0f;
+                device->FOAOut.Ambi.Map[i].Index = i;
+            }
+            device->FOAOut.CoeffCount = 0;
+
+            ambiup_reset(device->AmbiUp, device);
+        }
     }
     else
     {
@@ -665,7 +713,7 @@ static void InitHQPanning(ALCdevice *device, const AmbDecConf *conf, const ALuin
     if(GetConfigValueBool(devname, "decoder", "distance-comp", 1))
         decflags |= BFDF_DistanceComp;
 
-    if((conf->ChanMask & ~0x831b))
+    if((conf->ChanMask&AMBI_PERIPHONIC_MASK))
     {
         count = (conf->ChanMask > 0x1ff) ? 16 :
                 (conf->ChanMask > 0xf) ? 9 : 4;
@@ -677,7 +725,7 @@ static void InitHQPanning(ALCdevice *device, const AmbDecConf *conf, const ALuin
     }
     else
     {
-        static int map[MAX_AMBI_COEFFS] = { 0, 1, 3, 4, 8, 9, 15 };
+        static const int map[MAX_AMBI2D_COEFFS] = { 0, 1, 3, 4, 8, 9, 15 };
 
         count = (conf->ChanMask > 0x1ff) ? 7 :
                 (conf->ChanMask > 0xf) ? 5 : 3;
@@ -693,14 +741,14 @@ static void InitHQPanning(ALCdevice *device, const AmbDecConf *conf, const ALuin
     TRACE("Enabling %s-band %s-order%s ambisonic decoder\n",
         (conf->FreqBands == 1) ? "single" : "dual",
         (conf->ChanMask > 0xf) ? (conf->ChanMask > 0x1ff) ? "third" : "second" : "first",
-        (conf->ChanMask & ~0x831b) ? " periphonic" : ""
+        (conf->ChanMask&AMBI_PERIPHONIC_MASK) ? " periphonic" : ""
     );
     bformatdec_reset(device->AmbiDecoder, conf, count, device->Frequency,
                      speakermap, decflags);
 
     if(bformatdec_getOrder(device->AmbiDecoder) < 2)
     {
-        memcpy(&device->FOAOut.Ambi, &device->Dry.Ambi, sizeof(device->FOAOut.Ambi));
+        device->FOAOut.Ambi = device->Dry.Ambi;
         device->FOAOut.CoeffCount = device->Dry.CoeffCount;
     }
     else
@@ -755,7 +803,7 @@ static void InitHrtfPanning(ALCdevice *device)
                   &device->Dry.NumChannels, AL_TRUE);
     device->Dry.CoeffCount = 4;
 
-    memcpy(&device->FOAOut.Ambi, &device->Dry.Ambi, sizeof(device->FOAOut.Ambi));
+    device->FOAOut.Ambi = device->Dry.Ambi;
     device->FOAOut.CoeffCount = device->Dry.CoeffCount;
 
     for(i = 0;i < device->Dry.NumChannels;i++)
@@ -780,7 +828,7 @@ static void InitUhjPanning(ALCdevice *device)
     device->Dry.CoeffCount = 0;
     device->Dry.NumChannels = count;
 
-    memcpy(&device->FOAOut.Ambi, &device->Dry.Ambi, sizeof(device->FOAOut.Ambi));
+    device->FOAOut.Ambi = device->Dry.Ambi;
     device->FOAOut.CoeffCount = device->Dry.CoeffCount;
 }
 
@@ -818,10 +866,12 @@ void aluInitRenderer(ALCdevice *device, ALint hrtf_id, enum HrtfRequestMode hrtf
             case DevFmtX51Rear: layout = "surround51rear"; break;
             case DevFmtX61: layout = "surround61"; break;
             case DevFmtX71: layout = "surround71"; break;
-            /* Mono, Stereo, and B-Fornat output don't use custom decoders. */
+            /* Mono, Stereo, and Ambisonics output don't use custom decoders. */
             case DevFmtMono:
             case DevFmtStereo:
-            case DevFmtBFormat3D:
+            case DevFmtAmbi1:
+            case DevFmtAmbi2:
+            case DevFmtAmbi3:
                 break;
         }
         if(layout)
@@ -846,6 +896,8 @@ void aluInitRenderer(ALCdevice *device, ALint hrtf_id, enum HrtfRequestMode hrtf
 
         if(pconf && GetConfigValueBool(devname, "decoder", "hq-mode", 0))
         {
+            ambiup_free(device->AmbiUp);
+            device->AmbiUp = NULL;
             if(!device->AmbiDecoder)
                 device->AmbiDecoder = bformatdec_alloc();
         }
@@ -853,6 +905,16 @@ void aluInitRenderer(ALCdevice *device, ALint hrtf_id, enum HrtfRequestMode hrtf
         {
             bformatdec_free(device->AmbiDecoder);
             device->AmbiDecoder = NULL;
+            if(device->FmtChans > DevFmtAmbi1 && device->FmtChans <= DevFmtAmbi3)
+            {
+                if(!device->AmbiUp)
+                    device->AmbiUp = ambiup_alloc();
+            }
+            else
+            {
+                ambiup_free(device->AmbiUp);
+                device->AmbiUp = NULL;
+            }
         }
 
         if(!pconf)
@@ -866,6 +928,8 @@ void aluInitRenderer(ALCdevice *device, ALint hrtf_id, enum HrtfRequestMode hrtf
         return;
     }
 
+    ambiup_free(device->AmbiUp);
+    device->AmbiUp = NULL;
     bformatdec_free(device->AmbiDecoder);
     device->AmbiDecoder = NULL;
 
@@ -914,7 +978,7 @@ void aluInitRenderer(ALCdevice *device, ALint hrtf_id, enum HrtfRequestMode hrtf
     if(hrtf_id >= 0 && (size_t)hrtf_id < VECTOR_SIZE(device->Hrtf_List))
     {
         const HrtfEntry *entry = &VECTOR_ELEM(device->Hrtf_List, hrtf_id);
-        if(GetHrtfSampleRate(entry->hrtf) == device->Frequency)
+        if(entry->hrtf->sampleRate == device->Frequency)
         {
             device->Hrtf = entry->hrtf;
             al_string_copy(&device->Hrtf_Name, entry->name);
@@ -924,7 +988,7 @@ void aluInitRenderer(ALCdevice *device, ALint hrtf_id, enum HrtfRequestMode hrtf
     for(i = 0;!device->Hrtf && i < VECTOR_SIZE(device->Hrtf_List);i++)
     {
         const HrtfEntry *entry = &VECTOR_ELEM(device->Hrtf_List, i);
-        if(GetHrtfSampleRate(entry->hrtf) == device->Frequency)
+        if(entry->hrtf->sampleRate == device->Frequency)
         {
             device->Hrtf = entry->hrtf;
             al_string_copy(&device->Hrtf_Name, entry->name);

@@ -46,7 +46,7 @@ static vector_al_string CaptureDevices;
 static void clear_devlist(vector_al_string *list)
 {
     VECTOR_FOR_EACH(al_string, *list, al_string_deinit);
-    VECTOR_RESIZE(*list, 0);
+    VECTOR_RESIZE(*list, 0, 0);
 }
 
 
@@ -58,7 +58,7 @@ static void ProbePlaybackDevices(void)
     clear_devlist(&PlaybackDevices);
 
     numdevs = waveOutGetNumDevs();
-    VECTOR_RESERVE(PlaybackDevices, numdevs);
+    VECTOR_RESIZE(PlaybackDevices, 0, numdevs);
     for(i = 0;i < numdevs;i++)
     {
         WAVEOUTCAPSW WaveCaps;
@@ -101,7 +101,7 @@ static void ProbeCaptureDevices(void)
     clear_devlist(&CaptureDevices);
 
     numdevs = waveInGetNumDevs();
-    VECTOR_RESERVE(CaptureDevices, numdevs);
+    VECTOR_RESIZE(CaptureDevices, 0, numdevs);
     for(i = 0;i < numdevs;i++)
     {
         WAVEINCAPSW WaveCaps;
@@ -164,7 +164,7 @@ static ALCboolean ALCwinmmPlayback_start(ALCwinmmPlayback *self);
 static void ALCwinmmPlayback_stop(ALCwinmmPlayback *self);
 static DECLARE_FORWARD2(ALCwinmmPlayback, ALCbackend, ALCenum, captureSamples, ALCvoid*, ALCuint)
 static DECLARE_FORWARD(ALCwinmmPlayback, ALCbackend, ALCuint, availableSamples)
-static DECLARE_FORWARD(ALCwinmmPlayback, ALCbackend, ALint64, getLatency)
+static DECLARE_FORWARD(ALCwinmmPlayback, ALCbackend, ClockLatency, getClockLatency)
 static DECLARE_FORWARD(ALCwinmmPlayback, ALCbackend, void, lock)
 static DECLARE_FORWARD(ALCwinmmPlayback, ALCbackend, void, unlock)
 DECLARE_DEFAULT_ALLOCATORS(ALCwinmmPlayback)
@@ -451,7 +451,7 @@ static ALCboolean ALCwinmmCapture_start(ALCwinmmCapture *self);
 static void ALCwinmmCapture_stop(ALCwinmmCapture *self);
 static ALCenum ALCwinmmCapture_captureSamples(ALCwinmmCapture *self, ALCvoid *buffer, ALCuint samples);
 static ALCuint ALCwinmmCapture_availableSamples(ALCwinmmCapture *self);
-static DECLARE_FORWARD(ALCwinmmCapture, ALCbackend, ALint64, getLatency)
+static DECLARE_FORWARD(ALCwinmmCapture, ALCbackend, ClockLatency, getClockLatency)
 static DECLARE_FORWARD(ALCwinmmCapture, ALCbackend, void, lock)
 static DECLARE_FORWARD(ALCwinmmCapture, ALCbackend, void, unlock)
 DECLARE_DEFAULT_ALLOCATORS(ALCwinmmCapture)
@@ -561,7 +561,9 @@ static ALCenum ALCwinmmCapture_open(ALCwinmmCapture *self, const ALCchar *name)
         case DevFmtX51Rear:
         case DevFmtX61:
         case DevFmtX71:
-        case DevFmtBFormat3D:
+        case DevFmtAmbi1:
+        case DevFmtAmbi2:
+        case DevFmtAmbi3:
             return ALC_INVALID_ENUM;
     }
 

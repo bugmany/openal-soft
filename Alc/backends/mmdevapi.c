@@ -79,7 +79,7 @@ static void clear_devlist(vector_DevMap *list)
     (i)->devid = NULL;           \
 } while(0)
     VECTOR_FOR_EACH(DevMap, *list, CLEAR_DEVMAP);
-    VECTOR_RESIZE(*list, 0);
+    VECTOR_RESIZE(*list, 0, 0);
 #undef CLEAR_DEVMAP
 }
 
@@ -258,11 +258,7 @@ static HRESULT probe_devices(IMMDeviceEnumerator *devenum, EDataFlow flowdir, ve
     if(SUCCEEDED(hr) && count > 0)
     {
         clear_devlist(list);
-        if(!VECTOR_RESERVE(*list, count))
-        {
-            IMMDeviceCollection_Release(coll);
-            return E_OUTOFMEMORY;
-        }
+        VECTOR_RESIZE(*list, 0, count);
 
         hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(devenum, flowdir,
                                                          eMultimedia, &defdev);
@@ -508,7 +504,7 @@ static void ALCmmdevPlayback_stop(ALCmmdevPlayback *self);
 static void ALCmmdevPlayback_stopProxy(ALCmmdevPlayback *self);
 static DECLARE_FORWARD2(ALCmmdevPlayback, ALCbackend, ALCenum, captureSamples, ALCvoid*, ALCuint)
 static DECLARE_FORWARD(ALCmmdevPlayback, ALCbackend, ALCuint, availableSamples)
-static ALint64 ALCmmdevPlayback_getLatency(ALCmmdevPlayback *self);
+static ClockLatency ALCmmdevPlayback_getClockLatency(ALCmmdevPlayback *self);
 static DECLARE_FORWARD(ALCmmdevPlayback, ALCbackend, void, lock)
 static DECLARE_FORWARD(ALCmmdevPlayback, ALCbackend, void, unlock)
 DECLARE_DEFAULT_ALLOCATORS(ALCmmdevPlayback)
@@ -885,7 +881,9 @@ static HRESULT ALCmmdevPlayback_resetProxy(ALCmmdevPlayback *self)
             OutputType.Format.nChannels = 1;
             OutputType.dwChannelMask = MONO;
             break;
-        case DevFmtBFormat3D:
+        case DevFmtAmbi1:
+        case DevFmtAmbi2:
+        case DevFmtAmbi3:
             device->FmtChans = DevFmtStereo;
             /*fall-through*/
         case DevFmtStereo:
@@ -1139,10 +1137,17 @@ static void ALCmmdevPlayback_stopProxy(ALCmmdevPlayback *self)
 }
 
 
-static ALint64 ALCmmdevPlayback_getLatency(ALCmmdevPlayback *self)
+static ClockLatency ALCmmdevPlayback_getClockLatency(ALCmmdevPlayback *self)
 {
     ALCdevice *device = STATIC_CAST(ALCbackend, self)->mDevice;
-    return (ALint64)self->Padding * 1000000000 / device->Frequency;
+    ClockLatency ret;
+
+    ALCmmdevPlayback_lock(self);
+    ret.ClockTime = GetDeviceClockTime(device);
+    ret.Latency = self->Padding * DEVICE_CLOCK_RES / device->Frequency;
+    ALCmmdevPlayback_unlock(self);
+
+    return ret;
 }
 
 
@@ -1181,7 +1186,7 @@ static void ALCmmdevCapture_stop(ALCmmdevCapture *self);
 static void ALCmmdevCapture_stopProxy(ALCmmdevCapture *self);
 static ALCenum ALCmmdevCapture_captureSamples(ALCmmdevCapture *self, ALCvoid *buffer, ALCuint samples);
 static ALuint ALCmmdevCapture_availableSamples(ALCmmdevCapture *self);
-static DECLARE_FORWARD(ALCmmdevCapture, ALCbackend, ALint64, getLatency)
+static DECLARE_FORWARD(ALCmmdevCapture, ALCbackend, ClockLatency, getClockLatency)
 static DECLARE_FORWARD(ALCmmdevCapture, ALCbackend, void, lock)
 static DECLARE_FORWARD(ALCmmdevCapture, ALCbackend, void, unlock)
 DECLARE_DEFAULT_ALLOCATORS(ALCmmdevCapture)
@@ -1519,7 +1524,9 @@ static HRESULT ALCmmdevCapture_resetProxy(ALCmmdevCapture *self)
             OutputType.dwChannelMask = X7DOT1;
             break;
 
-        case DevFmtBFormat3D:
+        case DevFmtAmbi1:
+        case DevFmtAmbi2:
+        case DevFmtAmbi3:
             return E_FAIL;
     }
     switch(device->FmtType)
@@ -1574,9 +1581,10 @@ static HRESULT ALCmmdevCapture_resetProxy(ALCmmdevCapture *self)
        wfx->nChannels != OutputType.Format.nChannels ||
        wfx->nBlockAlign != OutputType.Format.nBlockAlign)
     {
-        ERR("Did not get matching format, wanted: %s %s %uhz, got: %d channel(s) %d-bit %luhz\n",
-            DevFmtChannelsString(device->FmtChans), DevFmtTypeString(device->FmtType), device->Frequency,
-            wfx->nChannels, wfx->wBitsPerSample, wfx->nSamplesPerSec);
+        ERR("Failed to get matching format, wanted: %s %s %uhz, got: %d channel%s %d-bit %luhz\n",
+            DevFmtChannelsString(device->FmtChans), DevFmtTypeString(device->FmtType),
+            device->Frequency, wfx->nChannels, (wfx->nChannels==1)?"":"s", wfx->wBitsPerSample,
+            wfx->nSamplesPerSec);
         CoTaskMemFree(wfx);
         return E_FAIL;
     }
