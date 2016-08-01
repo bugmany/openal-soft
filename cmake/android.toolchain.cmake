@@ -5,8 +5,9 @@ include(CMakeForceCompiler)
 # CMake will look for prefixed g++, cpp, ld, etc. automatically
 CMAKE_FORCE_C_COMPILER(arm-linux-androideabi-gcc GNU)
 
-SET(CMAKE_REQUIRED_FLAGS "-fpie")
-SET(CMAKE_LD_FLAGS "-pie")
+set(CMAKE_C_FLAGS "-fpie -fPIE" CACHE STRING "" FORCE)
+set(CMAKE_LD_FLAGS "-pie" CACHE STRING "" FORCE)
+set(CMAKE_EXE_LINKER_FLAGS "-pie" CACHE STRING "" FORCE)
 
 SET(ANDROID TRUE)
 SET(SIZEOF_LONG 4)
