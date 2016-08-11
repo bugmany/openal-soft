@@ -437,7 +437,6 @@ static void CalcNonAttnSourceParams(ALvoice *voice, const struct ALsourceProps *
             voice->SendOut[i].Channels = SendSlots[i]->NumChannels;
         }
     }
-    voice->Looping = ATOMIC_LOAD(&props->Looping, almemory_order_relaxed);
 
     /* Calculate the stepping value */
     Pitch *= (ALfloat)ALBuffer->Frequency / Frequency;
@@ -906,7 +905,6 @@ static void CalcAttnSourceParams(ALvoice *voice, const struct ALsourceProps *pro
             voice->SendOut[i].Channels = SendSlots[i]->NumChannels;
         }
     }
-    voice->Looping = ATOMIC_LOAD(&props->Looping, almemory_order_relaxed);
 
     /* Transform source to listener space (convert to head relative) */
     if(ATOMIC_LOAD(&props->HeadRelative, almemory_order_relaxed) == AL_FALSE)
@@ -1286,7 +1284,7 @@ static void CalcAttnSourceParams(ALvoice *voice, const struct ALsourceProps *pro
 static void CalcSourceParams(ALvoice *voice, ALCcontext *context)
 {
     ALsource *source = voice->Source;
-    ALbufferlistitem *BufferListItem;
+    const ALbufferlistitem *BufferListItem;
     struct ALsourceProps *first;
     struct ALsourceProps *props;
 
@@ -1296,7 +1294,7 @@ static void CalcSourceParams(ALvoice *voice, ALCcontext *context)
     BufferListItem = ATOMIC_LOAD(&source->queue, almemory_order_relaxed);
     while(BufferListItem != NULL)
     {
-        ALbuffer *buffer;
+        const ALbuffer *buffer;
         if((buffer=BufferListItem->buffer) != NULL)
         {
             if(buffer->FmtChannels == FmtMono)
