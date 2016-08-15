@@ -758,53 +758,26 @@ static void InitHQPanning(ALCdevice *device, const AmbDecConf *conf, const ALuin
 
 static void InitHrtfPanning(ALCdevice *device)
 {
-    static const enum Channel CubeChannels[MAX_OUTPUT_CHANNELS] = {
-        UpperFrontLeft, UpperFrontRight, UpperBackLeft, UpperBackRight,
-        LowerFrontLeft, LowerFrontRight, LowerBackLeft, LowerBackRight,
-        InvalidChannel, InvalidChannel, InvalidChannel, InvalidChannel,
-        InvalidChannel, InvalidChannel, InvalidChannel, InvalidChannel
-    };
-    static const ChannelMap Cube8Cfg[8] = {
-        { UpperFrontLeft,  { 0.176776695f,  0.072168784f,  0.072168784f,  0.072168784f } },
-        { UpperFrontRight, { 0.176776695f,  0.072168784f, -0.072168784f,  0.072168784f } },
-        { UpperBackLeft,   { 0.176776695f, -0.072168784f,  0.072168784f,  0.072168784f } },
-        { UpperBackRight,  { 0.176776695f, -0.072168784f, -0.072168784f,  0.072168784f } },
-        { LowerFrontLeft,  { 0.176776695f,  0.072168784f,  0.072168784f, -0.072168784f } },
-        { LowerFrontRight, { 0.176776695f,  0.072168784f, -0.072168784f, -0.072168784f } },
-        { LowerBackLeft,   { 0.176776695f, -0.072168784f,  0.072168784f, -0.072168784f } },
-        { LowerBackRight,  { 0.176776695f, -0.072168784f, -0.072168784f, -0.072168784f } },
-    };
-    static const struct {
-        enum Channel Channel;
-        ALfloat Angle;
-        ALfloat Elevation;
-    } CubeInfo[8] = {
-        { UpperFrontLeft,  DEG2RAD( -45.0f), DEG2RAD( 45.0f) },
-        { UpperFrontRight, DEG2RAD(  45.0f), DEG2RAD( 45.0f) },
-        { UpperBackLeft,   DEG2RAD(-135.0f), DEG2RAD( 45.0f) },
-        { UpperBackRight,  DEG2RAD( 135.0f), DEG2RAD( 45.0f) },
-        { LowerFrontLeft,  DEG2RAD( -45.0f), DEG2RAD(-45.0f) },
-        { LowerFrontRight, DEG2RAD(  45.0f), DEG2RAD(-45.0f) },
-        { LowerBackLeft,   DEG2RAD(-135.0f), DEG2RAD(-45.0f) },
-        { LowerBackRight,  DEG2RAD( 135.0f), DEG2RAD(-45.0f) },
-    };
-    const ChannelMap *chanmap = Cube8Cfg;
-    size_t count = COUNTOF(Cube8Cfg);
+    size_t count = 4;
     ALuint i;
 
-    SetChannelMap(CubeChannels, device->Dry.Ambi.Coeffs, chanmap, count,
-                  &device->Dry.NumChannels, AL_TRUE);
-    device->Dry.CoeffCount = 4;
+    for(i = 0;i < count;i++)
+    {
+        device->Dry.Ambi.Map[i].Scale = 1.0f;
+        device->Dry.Ambi.Map[i].Index = i;
+    }
+    device->Dry.CoeffCount = 0;
+    device->Dry.NumChannels = count;
 
     device->FOAOut.Ambi = device->Dry.Ambi;
     device->FOAOut.CoeffCount = device->Dry.CoeffCount;
 
-    for(i = 0;i < device->Dry.NumChannels;i++)
-    {
-        int chan = GetChannelIndex(CubeChannels, CubeInfo[i].Channel);
-        GetLerpedHrtfCoeffs(device->Hrtf, CubeInfo[i].Elevation, CubeInfo[i].Angle, 1.0f, 0.0f,
-                            device->Hrtf_Params[chan].Coeffs, device->Hrtf_Params[chan].Delay);
-    }
+    memset(device->Hrtf_Coeffs, 0, sizeof(device->Hrtf_Coeffs));
+    device->Hrtf_IrSize = BuildBFormatHrtf(device->Hrtf, device->Hrtf_Coeffs,
+                                           device->Dry.NumChannels);
+
+    /* Round up to the nearest multiple of 8 */
+    device->Hrtf_IrSize = (device->Hrtf_IrSize+7)&~7;
 }
 
 static void InitUhjPanning(ALCdevice *device)
