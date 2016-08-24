@@ -28,6 +28,7 @@
 #include "alMain.h"
 #include "alSource.h"
 #include "alu.h"
+#include "bformatdec.h"
 #include "hrtf.h"
 
 #include "compat.h"
@@ -174,76 +175,112 @@ void GetLerpedHrtfCoeffs(const struct Hrtf *Hrtf, ALfloat elevation, ALfloat azi
 
 ALuint BuildBFormatHrtf(const struct Hrtf *Hrtf, ALfloat (*coeffs)[HRIR_LENGTH][2], ALuint NumChannels)
 {
-    ALuint total_hrirs = 0;
+    static const struct {
+        ALfloat elevation;
+        ALfloat azimuth;
+    } CubePoints[8] = {
+        { DEG2RAD( 35.0f), DEG2RAD( -45.0f) },
+        { DEG2RAD( 35.0f), DEG2RAD(  45.0f) },
+        { DEG2RAD( 35.0f), DEG2RAD(-135.0f) },
+        { DEG2RAD( 35.0f), DEG2RAD( 135.0f) },
+        { DEG2RAD(-35.0f), DEG2RAD( -45.0f) },
+        { DEG2RAD(-35.0f), DEG2RAD(  45.0f) },
+        { DEG2RAD(-35.0f), DEG2RAD(-135.0f) },
+        { DEG2RAD(-35.0f), DEG2RAD( 135.0f) },
+    };
+    static const ALfloat CubeMatrix[8][2][MAX_AMBI_COEFFS] = {
+        { { 0.25f,  0.14425f,  0.14425f,  0.14425f }, { 0.125f,  0.125f,  0.125f,  0.125f } },
+        { { 0.25f, -0.14425f,  0.14425f,  0.14425f }, { 0.125f, -0.125f,  0.125f,  0.125f } },
+        { { 0.25f,  0.14425f,  0.14425f, -0.14425f }, { 0.125f,  0.125f,  0.125f, -0.125f } },
+        { { 0.25f, -0.14425f,  0.14425f, -0.14425f }, { 0.125f, -0.125f,  0.125f, -0.125f } },
+        { { 0.25f,  0.14425f, -0.14425f,  0.14425f }, { 0.125f,  0.125f, -0.125f,  0.125f } },
+        { { 0.25f, -0.14425f, -0.14425f,  0.14425f }, { 0.125f, -0.125f, -0.125f,  0.125f } },
+        { { 0.25f,  0.14425f, -0.14425f, -0.14425f }, { 0.125f,  0.125f, -0.125f, -0.125f } },
+        { { 0.25f, -0.14425f, -0.14425f, -0.14425f }, { 0.125f, -0.125f, -0.125f, -0.125f } },
+    };
+    BandSplitter splitter;
+    ALfloat temps[3][HRIR_LENGTH];
+    ALuint lidx[8], ridx[8];
+    ALuint min_delay = HRTF_HISTORY_LENGTH;
     ALuint max_length = 0;
-    ALuint eidx, aidx, i, j;
-    ALfloat scale;
+    ALuint i, j, c, b;
 
     assert(NumChannels == 4);
 
-    for(eidx = 0;eidx < Hrtf->evCount;++eidx)
+    for(c = 0;c < 8;c++)
     {
-        const ALfloat elev = (ALfloat)eidx/(ALfloat)(Hrtf->evCount-1)*F_PI - F_PI_2;
-        const ALuint evoffset = Hrtf->evOffset[eidx];
-        const ALuint azcount = Hrtf->azCount[eidx];
+        ALuint evidx, azidx;
+        ALuint evoffset;
+        ALuint azcount;
 
-        for(aidx = 0;aidx < azcount;++aidx)
-        {
-            ALfloat ambcoeffs[4];
-            const ALshort *fir;
-            ALuint length, delay;
-            ALuint lidx, ridx;
-            ALfloat x, y, z;
-            ALfloat azi;
+        /* Calculate elevation index. */
+        evidx = (ALuint)floorf((F_PI_2 + CubePoints[c].elevation) *
+                               (Hrtf->evCount-1)/F_PI + 0.5f);
+        evidx = minu(evidx, Hrtf->evCount-1);
 
-            lidx = evoffset + aidx;
-            ridx = evoffset + ((azcount - aidx) % azcount);
+        azcount = Hrtf->azCount[evidx];
+        evoffset = Hrtf->evOffset[evidx];
 
-            azi = (ALfloat)aidx/(ALfloat)azcount * -F_TAU;
-            x = cosf(azi) * cosf(elev);
-            y = sinf(azi) * cosf(elev);
-            z = sinf(elev);
+        /* Calculate azimuth index for this elevation. */
+        azidx = (ALuint)floorf((F_TAU+CubePoints[c].azimuth) *
+                               azcount/F_TAU + 0.5f) % azcount;
 
-            ambcoeffs[0] = 1.0f;
-            ambcoeffs[1] = y / 1.732050808f;
-            ambcoeffs[2] = z / 1.732050808f;
-            ambcoeffs[3] = x / 1.732050808f;
+        /* Calculate indices for left and right channels. */
+        lidx[c] = evoffset + azidx;
+        ridx[c] = evoffset + ((azcount-azidx) % azcount);
 
-            /* Apply left ear response */
-            delay = Hrtf->delays[lidx];
-            fir = &Hrtf->coeffs[lidx * Hrtf->irSize];
-            length = minu(delay + Hrtf->irSize, HRIR_LENGTH);
-            for(i = 0;i < NumChannels;++i)
-            {
-                for(j = delay;j < length;++j)
-                    coeffs[i][j][0] += fir[j-delay]/32767.0f * ambcoeffs[i];
-            }
-            max_length = maxu(max_length, length);
-
-            /* Apply right ear response */
-            delay = Hrtf->delays[ridx];
-            fir = &Hrtf->coeffs[ridx * Hrtf->irSize];
-            length = minu(delay + Hrtf->irSize, HRIR_LENGTH);
-            for(i = 0;i < NumChannels;++i)
-            {
-                for(j = delay;j < length;++j)
-                    coeffs[i][j][1] += fir[j-delay]/32767.0f * ambcoeffs[i];
-            }
-            max_length = maxu(max_length, length);
-
-            total_hrirs++;
-        }
+        min_delay = minu(min_delay, minu(Hrtf->delays[lidx[c]], Hrtf->delays[ridx[c]]));
     }
 
-    scale = (ALfloat)total_hrirs;
-    for(i = 0;i < NumChannels;++i)
+    memset(temps, 0, sizeof(temps));
+    bandsplit_init(&splitter, 400.0f / (ALfloat)Hrtf->sampleRate);
+    for(c = 0;c < 8;c++)
     {
-        for(j = 0;j < max_length;++j)
+        const ALshort *fir;
+        ALuint delay;
+
+        /* Band-split left HRIR into low and high frequency responses. */
+        bandsplit_clear(&splitter);
+        fir = &Hrtf->coeffs[lidx[c] * Hrtf->irSize];
+        for(i = 0;i < Hrtf->irSize;i++)
+            temps[2][i] = fir[i] / 32767.0f;
+        bandsplit_process(&splitter, temps[0], temps[1], temps[2], HRIR_LENGTH);
+
+        /* Add to the left output coefficients with the specified delay. */
+        delay = Hrtf->delays[lidx[c]] - min_delay;
+        for(i = 0;i < NumChannels;++i)
         {
-            coeffs[i][j][0] /= scale;
-            coeffs[i][j][1] /= scale;
+            for(b = 0;b < 2;b++)
+            {
+                ALuint k = 0;
+                for(j = delay;j < HRIR_LENGTH;++j)
+                    coeffs[i][j][0] += temps[b][k++] * CubeMatrix[c][b][i];
+            }
         }
+        max_length = maxu(max_length, minu(delay + Hrtf->irSize, HRIR_LENGTH));
+
+        /* Band-split right HRIR into low and high frequency responses. */
+        bandsplit_clear(&splitter);
+        fir = &Hrtf->coeffs[ridx[c] * Hrtf->irSize];
+        for(i = 0;i < Hrtf->irSize;i++)
+            temps[2][i] = fir[i] / 32767.0f;
+        bandsplit_process(&splitter, temps[0], temps[1], temps[2], HRIR_LENGTH);
+
+        /* Add to the right output coefficients with the specified delay. */
+        delay = Hrtf->delays[ridx[c]] - min_delay;
+        for(i = 0;i < NumChannels;++i)
+        {
+            for(b = 0;b < 2;b++)
+            {
+                ALuint k = 0;
+                for(j = delay;j < HRIR_LENGTH;++j)
+                    coeffs[i][j][1] += temps[b][k++] * CubeMatrix[c][b][i];
+            }
+        }
+        max_length = maxu(max_length, minu(delay + Hrtf->irSize, HRIR_LENGTH));
     }
+    TRACE("Skipped min delay: %u, new combined length: %u\n", min_delay, max_length);
+
     return max_length;
 }
 
