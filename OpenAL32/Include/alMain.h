@@ -127,6 +127,11 @@ AL_API ALboolean AL_APIENTRY alIsBufferFormatSupportedSOFT(ALenum format);
 #endif
 #endif
 
+#ifndef AL_SOFT_gain_clamp_ex
+#define AL_SOFT_gain_clamp_ex 1
+#define AL_GAIN_LIMIT_SOFT                       0x200E
+#endif
+
 
 typedef ALint64SOFT ALint64;
 typedef ALuint64SOFT ALuint64;
@@ -285,6 +290,12 @@ static void T##_Delete(void *ptr) { al_free(ptr); }
     {                                                                         \
         memset(_res, 0, sizeof(T));                                           \
         T##_Construct(_res, EXTRACT_NEW_ARGS
+#define NEW_OBJ0(_res, T) do {                                                \
+    _res = T##_New(sizeof(T));                                                \
+    if(_res)                                                                  \
+    {                                                                         \
+        memset(_res, 0, sizeof(T));                                           \
+        T##_Construct(_res EXTRACT_NEW_ARGS
 
 
 #ifdef __cplusplus
@@ -593,16 +604,18 @@ struct ALCdevice_struct
     UIntMap FilterMap;
 
     /* HRTF filter tables */
-    vector_HrtfEntry Hrtf_List;
-    al_string Hrtf_Name;
-    const struct Hrtf *Hrtf;
-    ALCenum Hrtf_Status;
+    struct {
+        vector_HrtfEntry List;
+        al_string Name;
+        ALCenum Status;
+        const struct Hrtf *Handle;
 
-    /* HRTF filter state for dry buffer content */
-    alignas(16) ALfloat Hrtf_Values[4][HRIR_LENGTH][2];
-    alignas(16) ALfloat Hrtf_Coeffs[4][HRIR_LENGTH][2];
-    ALuint Hrtf_Offset;
-    ALuint Hrtf_IrSize;
+        /* HRTF filter state for dry buffer content */
+        alignas(16) ALfloat Values[4][HRIR_LENGTH][2];
+        alignas(16) ALfloat Coeffs[4][HRIR_LENGTH][2];
+        ALuint Offset;
+        ALuint IrSize;
+    } Hrtf;
 
     /* UHJ encoder state */
     struct Uhj2Encoder *Uhj_Encoder;
@@ -764,7 +777,7 @@ void AppendCaptureDeviceList(const ALCchar *name);
 void ALCdevice_Lock(ALCdevice *device);
 void ALCdevice_Unlock(ALCdevice *device);
 
-void ALCcontext_DeferUpdates(ALCcontext *context);
+void ALCcontext_DeferUpdates(ALCcontext *context, ALenum type);
 void ALCcontext_ProcessUpdates(ALCcontext *context);
 
 inline void LockContext(ALCcontext *context)
@@ -772,6 +785,12 @@ inline void LockContext(ALCcontext *context)
 
 inline void UnlockContext(ALCcontext *context)
 { ALCdevice_Unlock(context->Device); }
+
+enum {
+    DeferOff = AL_FALSE,
+    DeferAll,
+    DeferAllowPlay
+};
 
 
 typedef struct {

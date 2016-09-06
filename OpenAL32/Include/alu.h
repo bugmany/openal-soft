@@ -79,6 +79,7 @@ inline void aluVectorSet(aluVector *vector, ALfloat x, ALfloat y, ALfloat z, ALf
 typedef union aluMatrixf {
     alignas(16) ALfloat m[4][4];
 } aluMatrixf;
+const aluMatrixf IdentityMatrixf;
 
 inline void aluMatrixfSetRow(aluMatrixf *matrix, ALuint row,
                              ALfloat m0, ALfloat m1, ALfloat m2, ALfloat m3)
@@ -160,9 +161,9 @@ typedef const ALfloat* (*ResamplerFunc)(const BsincState *state,
 typedef void (*MixerFunc)(const ALfloat *data, ALuint OutChans,
                           ALfloat (*restrict OutBuffer)[BUFFERSIZE], struct MixGains *Gains,
                           ALuint Counter, ALuint OutPos, ALuint BufferSize);
-typedef void (*MatrixMixerFunc)(ALfloat *OutBuffer, const ALfloat *Mtx,
-                                ALfloat (*restrict data)[BUFFERSIZE], ALuint InChans,
-                                ALuint BufferSize);
+typedef void (*RowMixerFunc)(ALfloat *OutBuffer, const ALfloat *gains,
+                             ALfloat (*restrict data)[BUFFERSIZE], ALuint InChans,
+                             ALuint BufferSize);
 typedef void (*HrtfMixerFunc)(ALfloat (*restrict OutBuffer)[BUFFERSIZE], ALuint lidx, ALuint ridx,
                               const ALfloat *data, ALuint Counter, ALuint Offset, ALuint OutPos,
                               const ALuint IrSize, const MixHrtfParams *hrtfparams,
@@ -172,6 +173,8 @@ typedef void (*HrtfDirectMixerFunc)(ALfloat (*restrict OutBuffer)[BUFFERSIZE],
                                     const ALuint IrSize, ALfloat (*restrict Coeffs)[2],
                                     ALfloat (*restrict Values)[2], ALuint BufferSize);
 
+
+#define GAIN_MIX_MAX  (16.0f) /* +24dB */
 
 #define GAIN_SILENCE_THRESHOLD  (0.00001f) /* -100dB */
 

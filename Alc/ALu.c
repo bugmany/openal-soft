@@ -93,6 +93,13 @@ extern inline void aluMatrixfSet(aluMatrixf *matrix,
                                  ALfloat m20, ALfloat m21, ALfloat m22, ALfloat m23,
                                  ALfloat m30, ALfloat m31, ALfloat m32, ALfloat m33);
 
+const aluMatrixf IdentityMatrixf = {{
+    { 1.0f, 0.0f, 0.0f, 0.0f },
+    { 0.0f, 1.0f, 0.0f, 0.0f },
+    { 0.0f, 0.0f, 1.0f, 0.0f },
+    { 0.0f, 0.0f, 0.0f, 1.0f },
+}};
+
 
 static inline HrtfDirectMixerFunc SelectHrtfMixer(void)
 {
@@ -228,7 +235,7 @@ static ALboolean BsincPrepare(const ALuint increment, BsincState *state)
 }
 
 
-static void CalcListenerParams(ALCcontext *Context)
+static ALboolean CalcListenerParams(ALCcontext *Context)
 {
     ALlistener *Listener = Context->Listener;
     ALfloat N[3], V[3], U[3], P[3];
@@ -237,7 +244,7 @@ static void CalcListenerParams(ALCcontext *Context)
     aluVector vel;
 
     props = ATOMIC_EXCHANGE(struct ALlistenerProps*, &Listener->Update, NULL, almemory_order_acq_rel);
-    if(!props) return;
+    if(!props) return AL_FALSE;
 
     /* AT then UP */
     N[0] = ATOMIC_LOAD(&props->Forward[0], almemory_order_relaxed);
@@ -278,6 +285,9 @@ static void CalcListenerParams(ALCcontext *Context)
     Listener->Params.SpeedOfSound = ATOMIC_LOAD(&props->SpeedOfSound, almemory_order_relaxed) *
                                     ATOMIC_LOAD(&props->DopplerVelocity, almemory_order_relaxed);
 
+    Listener->Params.SourceDistanceModel = ATOMIC_LOAD(&props->SourceDistanceModel, almemory_order_relaxed);
+    Listener->Params.DistanceModel = ATOMIC_LOAD(&props->DistanceModel, almemory_order_relaxed);
+
     /* WARNING: A livelock is theoretically possible if another thread keeps
      * changing the freelist head without giving this a chance to actually swap
      * in the old container (practically impossible with this little code,
@@ -288,16 +298,18 @@ static void CalcListenerParams(ALCcontext *Context)
         ATOMIC_STORE(&props->next, first, almemory_order_relaxed);
     } while(ATOMIC_COMPARE_EXCHANGE_WEAK(struct ALlistenerProps*,
             &Listener->FreeList, &first, props) == 0);
+
+    return AL_TRUE;
 }
 
-static void CalcEffectSlotParams(ALeffectslot *slot, ALCdevice *device)
+static ALboolean CalcEffectSlotParams(ALeffectslot *slot, ALCdevice *device)
 {
     struct ALeffectslotProps *first;
     struct ALeffectslotProps *props;
     ALeffectState *state;
 
     props = ATOMIC_EXCHANGE(struct ALeffectslotProps*, &slot->Update, NULL, almemory_order_acq_rel);
-    if(!props) return;
+    if(!props) return AL_FALSE;
 
     slot->Params.Gain = ATOMIC_LOAD(&props->Gain, almemory_order_relaxed);
     slot->Params.AuxSendAuto = ATOMIC_LOAD(&props->AuxSendAuto, almemory_order_relaxed);
@@ -314,18 +326,15 @@ static void CalcEffectSlotParams(ALeffectslot *slot, ALCdevice *device)
         slot->Params.DecayTime = 0.0f;
         slot->Params.AirAbsorptionGainHF = 1.0f;
     }
-    state = ATOMIC_EXCHANGE(ALeffectState*, &props->State, NULL, almemory_order_relaxed);
 
-    /* If the state object is changed, exchange it with the current one so it
-     * remains in the freelist and isn't leaked.
+    /* Swap effect states. No need to play with the ref counts since they keep
+     * the same number of refs.
      */
-    if(state != slot->Params.EffectState)
-    {
-        ATOMIC_STORE(&props->State, slot->Params.EffectState, almemory_order_relaxed);
-        slot->Params.EffectState = state;
-    }
+    state = ATOMIC_EXCHANGE(ALeffectState*, &props->State, slot->Params.EffectState,
+                            almemory_order_relaxed);
+    slot->Params.EffectState = state;
 
-    V(slot->Params.EffectState,update)(device, slot, &props->Props);
+    V(state,update)(device, slot, &props->Props);
 
     /* WARNING: A livelock is theoretically possible if another thread keeps
      * changing the freelist head without giving this a chance to actually swap
@@ -337,6 +346,8 @@ static void CalcEffectSlotParams(ALeffectslot *slot, ALCdevice *device)
         ATOMIC_STORE(&props->next, first, almemory_order_relaxed);
     } while(ATOMIC_COMPARE_EXCHANGE_WEAK(struct ALeffectslotProps*,
             &slot->FreeList, &first, props) == 0);
+
+    return AL_TRUE;
 }
 
 
@@ -448,13 +459,15 @@ static void CalcNonAttnSourceParams(ALvoice *voice, const struct ALsourceProps *
 
     /* Calculate gains */
     DryGain  = clampf(SourceVolume, MinVolume, MaxVolume);
-    DryGain  *= ATOMIC_LOAD(&props->Direct.Gain, almemory_order_relaxed) * ListenerGain;
+    DryGain *= ATOMIC_LOAD(&props->Direct.Gain, almemory_order_relaxed) * ListenerGain;
+    DryGain  = minf(DryGain, GAIN_MIX_MAX);
     DryGainHF = ATOMIC_LOAD(&props->Direct.GainHF, almemory_order_relaxed);
     DryGainLF = ATOMIC_LOAD(&props->Direct.GainLF, almemory_order_relaxed);
     for(i = 0;i < NumSends;i++)
     {
-        WetGain[i] = clampf(SourceVolume, MinVolume, MaxVolume);
-        WetGain[i]  *= ATOMIC_LOAD(&props->Send[i].Gain, almemory_order_relaxed) * ListenerGain;
+        WetGain[i]  = clampf(SourceVolume, MinVolume, MaxVolume);
+        WetGain[i] *= ATOMIC_LOAD(&props->Send[i].Gain, almemory_order_relaxed) * ListenerGain;
+        WetGain[i]  = minf(WetGain[i], GAIN_MIX_MAX);
         WetGainHF[i] = ATOMIC_LOAD(&props->Send[i].GainHF, almemory_order_relaxed);
         WetGainLF[i] = ATOMIC_LOAD(&props->Send[i].GainLF, almemory_order_relaxed);
     }
@@ -534,7 +547,7 @@ static void CalcNonAttnSourceParams(ALvoice *voice, const struct ALsourceProps *
         aluCrossproduct(N, V, U);
         aluNormalize(U);
 
-        /* Build a rotate + conversion matrix (B-Format -> N3D). */
+        /* Build a rotate + conversion matrix (FuMa -> ACN+N3D). */
         scale = 1.732050808f;
         aluMatrixfSet(&matrix,
             1.414213562f,        0.0f,        0.0f,        0.0f,
@@ -644,7 +657,7 @@ static void CalcNonAttnSourceParams(ALvoice *voice, const struct ALsourceProps *
                 }
 
                 /* Get the static HRIR coefficients and delays for this channel. */
-                GetLerpedHrtfCoeffs(Device->Hrtf,
+                GetLerpedHrtfCoeffs(Device->Hrtf.Handle,
                     chans[c].elevation, chans[c].angle, 0.0f, DryGain,
                     voice->Chan[c].Direct.Hrtf.Target.Coeffs,
                     voice->Chan[c].Direct.Hrtf.Target.Delay
@@ -937,7 +950,9 @@ static void CalcAttnSourceParams(ALvoice *voice, const struct ALsourceProps *pro
     Attenuation = 1.0f;
     for(i = 0;i < NumSends;i++)
         RoomAttenuation[i] = 1.0f;
-    switch(ATOMIC_LOAD(&props->DistanceModel, almemory_order_relaxed))
+    switch(Listener->Params.SourceDistanceModel ?
+           ATOMIC_LOAD(&props->DistanceModel, almemory_order_relaxed) :
+           Listener->Params.DistanceModel)
     {
         case InverseDistanceClamped:
             ClampedDist = clampf(ClampedDist, MinDist, MaxDist);
@@ -1080,18 +1095,17 @@ static void CalcAttnSourceParams(ALvoice *voice, const struct ALsourceProps *pro
         }
     }
 
-    /* Clamp to Min/Max Gain */
-    DryGain = clampf(DryGain, MinVolume, MaxVolume);
-    for(i = 0;i < NumSends;i++)
-        WetGain[i] = clampf(WetGain[i], MinVolume, MaxVolume);
-
     /* Apply gain and frequency filters */
-    DryGain   *= ATOMIC_LOAD(&props->Direct.Gain, almemory_order_relaxed) * ListenerGain;
+    DryGain  = clampf(DryGain, MinVolume, MaxVolume);
+    DryGain *= ATOMIC_LOAD(&props->Direct.Gain, almemory_order_relaxed) * ListenerGain;
+    DryGain  = minf(DryGain, GAIN_MIX_MAX);
     DryGainHF *= ATOMIC_LOAD(&props->Direct.GainHF, almemory_order_relaxed);
     DryGainLF *= ATOMIC_LOAD(&props->Direct.GainLF, almemory_order_relaxed);
     for(i = 0;i < NumSends;i++)
     {
-        WetGain[i]   *= ATOMIC_LOAD(&props->Send[i].Gain, almemory_order_relaxed) * ListenerGain;
+        WetGain[i]  = clampf(WetGain[i], MinVolume, MaxVolume);
+        WetGain[i] *= ATOMIC_LOAD(&props->Send[i].Gain, almemory_order_relaxed) * ListenerGain;
+        WetGain[i]  = minf(WetGain[i], GAIN_MIX_MAX);
         WetGainHF[i] *= ATOMIC_LOAD(&props->Send[i].GainHF, almemory_order_relaxed);
         WetGainLF[i] *= ATOMIC_LOAD(&props->Send[i].GainLF, almemory_order_relaxed);
     }
@@ -1158,7 +1172,7 @@ static void CalcAttnSourceParams(ALvoice *voice, const struct ALsourceProps *pro
             spread = asinf(radius / Distance) * 2.0f;
 
         /* Get the HRIR coefficients and delays. */
-        GetLerpedHrtfCoeffs(Device->Hrtf, ev, az, spread, DryGain,
+        GetLerpedHrtfCoeffs(Device->Hrtf.Handle, ev, az, spread, DryGain,
                             voice->Chan[0].Direct.Hrtf.Target.Coeffs,
                             voice->Chan[0].Direct.Hrtf.Target.Delay);
 
@@ -1281,7 +1295,7 @@ static void CalcAttnSourceParams(ALvoice *voice, const struct ALsourceProps *pro
     }
 }
 
-static void CalcSourceParams(ALvoice *voice, ALCcontext *context)
+static void CalcSourceParams(ALvoice *voice, ALCcontext *context, ALboolean force)
 {
     ALsource *source = voice->Source;
     const ALbufferlistitem *BufferListItem;
@@ -1289,7 +1303,23 @@ static void CalcSourceParams(ALvoice *voice, ALCcontext *context)
     struct ALsourceProps *props;
 
     props = ATOMIC_EXCHANGE(struct ALsourceProps*, &source->Update, NULL, almemory_order_acq_rel);
-    if(!props) return;
+    if(!props && !force) return;
+
+    if(props)
+    {
+        voice->Props = *props;
+
+        /* WARNING: A livelock is theoretically possible if another thread
+         * keeps changing the freelist head without giving this a chance to
+         * actually swap in the old container (practically impossible with this
+         * little code, but...).
+         */
+        first = ATOMIC_LOAD(&source->FreeList);
+        do {
+            ATOMIC_STORE(&props->next, first, almemory_order_relaxed);
+        } while(ATOMIC_COMPARE_EXCHANGE_WEAK(struct ALsourceProps*,
+                &source->FreeList, &first, props) == 0);
+    }
 
     BufferListItem = ATOMIC_LOAD(&source->queue, almemory_order_relaxed);
     while(BufferListItem != NULL)
@@ -1298,24 +1328,13 @@ static void CalcSourceParams(ALvoice *voice, ALCcontext *context)
         if((buffer=BufferListItem->buffer) != NULL)
         {
             if(buffer->FmtChannels == FmtMono)
-                CalcAttnSourceParams(voice, props, buffer, context);
+                CalcAttnSourceParams(voice, &voice->Props, buffer, context);
             else
-                CalcNonAttnSourceParams(voice, props, buffer, context);
+                CalcNonAttnSourceParams(voice, &voice->Props, buffer, context);
             break;
         }
         BufferListItem = BufferListItem->next;
     }
-
-    /* WARNING: A livelock is theoretically possible if another thread keeps
-     * changing the freelist head without giving this a chance to actually swap
-     * in the old container (practically impossible with this little code,
-     * but...).
-     */
-    first = ATOMIC_LOAD(&source->FreeList);
-    do {
-        ATOMIC_STORE(&props->next, first, almemory_order_relaxed);
-    } while(ATOMIC_COMPARE_EXCHANGE_WEAK(struct ALsourceProps*,
-            &source->FreeList, &first, props) == 0);
 }
 
 
@@ -1327,10 +1346,10 @@ static void UpdateContextSources(ALCcontext *ctx, ALeffectslot *slot)
     IncrementRef(&ctx->UpdateCount);
     if(!ATOMIC_LOAD(&ctx->HoldUpdates))
     {
-        CalcListenerParams(ctx);
+        ALboolean force = CalcListenerParams(ctx);
         while(slot)
         {
-            CalcEffectSlotParams(slot, ctx->Device);
+            force |= CalcEffectSlotParams(slot, ctx->Device);
             slot = ATOMIC_LOAD(&slot->next, almemory_order_relaxed);
         }
 
@@ -1342,7 +1361,7 @@ static void UpdateContextSources(ALCcontext *ctx, ALeffectslot *slot)
             if(source->state != AL_PLAYING && source->state != AL_PAUSED)
                 voice->Source = NULL;
             else
-                CalcSourceParams(voice, ctx);
+                CalcSourceParams(voice, ctx, force);
         }
     }
     IncrementRef(&ctx->UpdateCount);
@@ -1498,23 +1517,23 @@ ALvoid aluMixData(ALCdevice *device, ALvoid *buffer, ALsizei size)
         V0(device->Backend,unlock)();
         IncrementRef(&device->MixCount);
 
-        if(device->Hrtf)
+        if(device->Hrtf.Handle)
         {
             int lidx = GetChannelIdxByName(device->RealOut, FrontLeft);
             int ridx = GetChannelIdxByName(device->RealOut, FrontRight);
             if(lidx != -1 && ridx != -1)
             {
                 HrtfDirectMixerFunc HrtfMix = SelectHrtfMixer();
-                ALuint irsize = device->Hrtf_IrSize;
+                ALuint irsize = device->Hrtf.IrSize;
                 for(c = 0;c < device->Dry.NumChannels;c++)
                 {
                     HrtfMix(device->RealOut.Buffer, lidx, ridx,
-                        device->Dry.Buffer[c], device->Hrtf_Offset, irsize,
-                        device->Hrtf_Coeffs[c], device->Hrtf_Values[c],
+                        device->Dry.Buffer[c], device->Hrtf.Offset, irsize,
+                        device->Hrtf.Coeffs[c], device->Hrtf.Values[c],
                         SamplesToDo
                     );
                 }
-                device->Hrtf_Offset += SamplesToDo;
+                device->Hrtf.Offset += SamplesToDo;
             }
         }
         else if(device->AmbiDecoder)
