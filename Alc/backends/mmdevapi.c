@@ -52,6 +52,7 @@ DEFINE_GUID(KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, 0x00000003, 0x0000, 0x0010, 0x80, 0
 
 DEFINE_DEVPROPKEY(DEVPKEY_Device_FriendlyName, 0xa45c254e, 0xdf1c, 0x4efd, 0x80,0x20, 0x67,0xd1,0x46,0xa8,0x50,0xe0, 14);
 DEFINE_PROPERTYKEY(PKEY_AudioEndpoint_FormFactor, 0x1da5d803, 0xd492, 0x4edd, 0x8c,0x23, 0xe0,0xc0,0xff,0xee,0x7f,0x0e, 0);
+DEFINE_PROPERTYKEY(PKEY_AudioEndpoint_GUID, 0x1da5d803, 0xd492, 0x4edd, 0x8c, 0x23,0xe0, 0xc0,0xff,0xee,0x7f,0x0e, 4 );
 
 #define MONO SPEAKER_FRONT_CENTER
 #define STEREO (SPEAKER_FRONT_LEFT|SPEAKER_FRONT_RIGHT)
@@ -67,6 +68,7 @@ DEFINE_PROPERTYKEY(PKEY_AudioEndpoint_FormFactor, 0x1da5d803, 0xd492, 0x4edd, 0x
 
 typedef struct {
     al_string name;
+    al_string endpoint_guid; // obtained from PKEY_AudioEndpoint_GUID , set to "Unknown device GUID" if absent.
     WCHAR *devid;
 } DevMap;
 TYPEDEF_VECTOR(DevMap, vector_DevMap)
@@ -75,6 +77,7 @@ static void clear_devlist(vector_DevMap *list)
 {
 #define CLEAR_DEVMAP(i) do {     \
     AL_STRING_DEINIT((i)->name); \
+    AL_STRING_DEINIT((i)->endpoint_guid); \
     free((i)->devid);            \
     (i)->devid = NULL;           \
 } while(0)
@@ -119,10 +122,11 @@ static HRESULT WaitForResponse(ThreadRequest *req)
 }
 
 
-static void get_device_name(IMMDevice *device, al_string *name)
+static void get_device_name_and_guid(IMMDevice *device, al_string *name, al_string *guid)
 {
     IPropertyStore *ps;
     PROPVARIANT pvname;
+    PROPVARIANT pvguid;
     HRESULT hr;
 
     al_string_copy_cstr(name, DEVNAME_HEAD);
@@ -132,6 +136,7 @@ static void get_device_name(IMMDevice *device, al_string *name)
     {
         WARN("OpenPropertyStore failed: 0x%08lx\n", hr);
         al_string_append_cstr(name, "Unknown Device Name");
+        if(guid!=NULL)al_string_copy_cstr(guid, "Unknown Device GUID");
         return;
     }
 
@@ -150,8 +155,28 @@ static void get_device_name(IMMDevice *device, al_string *name)
         WARN("Unexpected PROPVARIANT type: 0x%04x\n", pvname.vt);
         al_string_append_cstr(name, "Unknown Device Name");
     }
-
     PropVariantClear(&pvname);
+
+    if(guid!=NULL){
+        PropVariantInit(&pvguid);
+
+        hr = IPropertyStore_GetValue(ps, (const PROPERTYKEY*)&PKEY_AudioEndpoint_GUID, &pvguid);
+        if(FAILED(hr))
+        {
+            WARN("GetValue AudioEndpoint_GUID failed: 0x%08lx\n", hr);
+            al_string_copy_cstr(guid, "Unknown Device GUID");
+        }
+        else if(pvguid.vt == VT_LPWSTR)
+            al_string_copy_wcstr(guid, pvguid.pwszVal);
+        else
+        {
+            WARN("Unexpected PROPVARIANT type: 0x%04x\n", pvguid.vt);
+            al_string_copy_cstr(guid, "Unknown Device GUID");
+        }
+
+        PropVariantClear(&pvguid);
+    }
+
     IPropertyStore_Release(ps);
 }
 
@@ -193,9 +218,10 @@ static void add_device(IMMDevice *device, LPCWSTR devid, vector_DevMap *list)
 
     AL_STRING_INIT(tmpname);
     AL_STRING_INIT(entry.name);
+    AL_STRING_INIT(entry.endpoint_guid);
 
     entry.devid = strdupW(devid);
-    get_device_name(device, &tmpname);
+    get_device_name_and_guid(device, &tmpname, &entry.endpoint_guid);
 
     while(1)
     {
@@ -216,7 +242,7 @@ static void add_device(IMMDevice *device, LPCWSTR devid, vector_DevMap *list)
         count++;
     }
 
-    TRACE("Got device \"%s\", \"%ls\"\n", al_string_get_cstr(entry.name), entry.devid);
+    TRACE("Got device \"%s\", \"%s\", \"%ls\"\n", al_string_get_cstr(entry.name), al_string_get_cstr(entry.endpoint_guid), entry.devid);
     VECTOR_PUSH_BACK(*list, entry);
 
     AL_STRING_DEINIT(tmpname);
@@ -663,7 +689,6 @@ static ALCboolean MakeExtensible(WAVEFORMATEXTENSIBLE *out, const WAVEFORMATEX *
     return ALC_TRUE;
 }
 
-
 static ALCenum ALCmmdevPlayback_open(ALCmmdevPlayback *self, const ALCchar *deviceName)
 {
     HRESULT hr = S_OK;
@@ -690,8 +715,23 @@ static ALCenum ALCmmdevPlayback_open(ALCmmdevPlayback *self, const ALCchar *devi
             }
 
             hr = E_FAIL;
-#define MATCH_NAME(i) (al_string_cmp_cstr((i)->name, deviceName) == 0)
+#define MATCH_NAME(i) (al_string_cmp_cstr((i)->name, deviceName) == 0 ||        \
+                       al_string_cmp_cstr((i)->endpoint_guid, deviceName) == 0)
             VECTOR_FIND_IF(iter, const DevMap, PlaybackDevices, MATCH_NAME);
+#undef MATCH_NAME
+            if(iter == VECTOR_END(PlaybackDevices))
+            {
+                int len;
+                if((len=MultiByteToWideChar(CP_UTF8, 0, deviceName, -1, NULL, 0)) > 0)
+                {
+                    WCHAR *wname = calloc(sizeof(WCHAR), len);
+                    MultiByteToWideChar(CP_UTF8, 0, deviceName, -1, wname, len);
+#define MATCH_NAME(i) (wcscmp((i)->devid, wname) == 0)
+                    VECTOR_FIND_IF(iter, const DevMap, PlaybackDevices, MATCH_NAME);
+#undef MATCH_NAME
+                    free(wname);
+                }
+            }
             if(iter == VECTOR_END(PlaybackDevices))
                 WARN("Failed to find device name matching \"%s\"\n", deviceName);
             else
@@ -701,7 +741,6 @@ static ALCenum ALCmmdevPlayback_open(ALCmmdevPlayback *self, const ALCchar *devi
                 al_string_copy(&device->DeviceName, iter->name);
                 hr = S_OK;
             }
-#undef MATCH_NAME
         }
     }
 
@@ -758,7 +797,7 @@ static HRESULT ALCmmdevPlayback_openProxy(ALCmmdevPlayback *self)
     {
         self->client = ptr;
         if(al_string_empty(device->DeviceName))
-            get_device_name(self->mmdev, &device->DeviceName);
+            get_device_name_and_guid(self->mmdev, &device->DeviceName, NULL);
     }
 
     if(FAILED(hr))
@@ -1335,8 +1374,23 @@ static ALCenum ALCmmdevCapture_open(ALCmmdevCapture *self, const ALCchar *device
             }
 
             hr = E_FAIL;
-#define MATCH_NAME(i) (al_string_cmp_cstr((i)->name, deviceName) == 0)
+#define MATCH_NAME(i) (al_string_cmp_cstr((i)->name, deviceName) == 0 ||        \
+                       al_string_cmp_cstr((i)->endpoint_guid, deviceName) == 0)
             VECTOR_FIND_IF(iter, const DevMap, CaptureDevices, MATCH_NAME);
+#undef MATCH_NAME
+            if(iter == VECTOR_END(CaptureDevices))
+            {
+                int len;
+                if((len=MultiByteToWideChar(CP_UTF8, 0, deviceName, -1, NULL, 0)) > 0)
+                {
+                    WCHAR *wname = calloc(sizeof(WCHAR), len);
+                    MultiByteToWideChar(CP_UTF8, 0, deviceName, -1, wname, len);
+#define MATCH_NAME(i) (wcscmp((i)->devid, wname) == 0)
+                    VECTOR_FIND_IF(iter, const DevMap, CaptureDevices, MATCH_NAME);
+#undef MATCH_NAME
+                    free(wname);
+                }
+            }
             if(iter == VECTOR_END(CaptureDevices))
                 WARN("Failed to find device name matching \"%s\"\n", deviceName);
             else
@@ -1346,7 +1400,6 @@ static ALCenum ALCmmdevCapture_open(ALCmmdevCapture *self, const ALCchar *device
                 al_string_copy(&device->DeviceName, iter->name);
                 hr = S_OK;
             }
-#undef MATCH_NAME
         }
     }
 
@@ -1421,7 +1474,7 @@ static HRESULT ALCmmdevCapture_openProxy(ALCmmdevCapture *self)
     {
         self->client = ptr;
         if(al_string_empty(device->DeviceName))
-            get_device_name(self->mmdev, &device->DeviceName);
+            get_device_name_and_guid(self->mmdev, &device->DeviceName, NULL);
     }
 
     if(FAILED(hr))

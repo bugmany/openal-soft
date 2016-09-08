@@ -32,6 +32,7 @@
 #include <time.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <ctype.h>
 #ifdef HAVE_MALLOC_H
 #include <malloc.h>
 #endif
@@ -65,6 +66,7 @@ DEFINE_GUID(IID_IAudioCaptureClient,  0xc8adbd64, 0xe71e, 0x48a0, 0xa4,0xde, 0x1
 #include <propkeydef.h>
 DEFINE_DEVPROPKEY(DEVPKEY_Device_FriendlyName, 0xa45c254e, 0xdf1c, 0x4efd, 0x80,0x20, 0x67,0xd1,0x46,0xa8,0x50,0xe0, 14);
 DEFINE_PROPERTYKEY(PKEY_AudioEndpoint_FormFactor, 0x1da5d803, 0xd492, 0x4edd, 0x8c,0x23, 0xe0,0xc0,0xff,0xee,0x7f,0x0e, 0);
+DEFINE_PROPERTYKEY(PKEY_AudioEndpoint_GUID, 0x1da5d803, 0xd492, 0x4edd, 0x8c, 0x23,0xe0, 0xc0,0xff,0xee,0x7f,0x0e, 4 );
 #endif
 #endif
 #endif /* AL_NO_UID_DEFS */
@@ -231,8 +233,37 @@ void FillCPUCaps(ALuint capfilter)
 #endif
 #endif
 #ifdef HAVE_NEON
-    /* Assume Neon support if compiled with it */
-    caps |= CPU_CAP_NEON;
+    FILE *file = fopen("/proc/cpuinfo", "rt");
+    if(file)
+        ERR("Failed to open /proc/cpuinfo, cannot check for NEON support\n");
+    else
+    {
+        char buf[256];
+        while(fgets(buf, sizeof(buf), file) != NULL)
+        {
+            char *str;
+
+            if(strncmp(buf, "Features\t:", 10) != 0)
+                continue;
+
+            TRACE("Got features string:%s\n", buf+10);
+
+            str = buf;
+            while((str=strstr(str, "neon")) != NULL)
+            {
+                if(isspace(*(str-1)) && (str[4] == 0 || isspace(str[4])))
+                {
+                    caps |= CPU_CAP_NEON;
+                    break;
+                }
+                str++;
+            }
+            break;
+        }
+
+        fclose(file);
+        file = NULL;
+    }
 #endif
 
     TRACE("Extensions:%s%s%s%s%s%s\n",
