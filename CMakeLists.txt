@@ -1,6 +1,6 @@
 # CMake build file list for OpenAL
 
-CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
+CMAKE_MINIMUM_REQUIRED(VERSION 2.8.5)
 
 PROJECT(OpenAL)
 
@@ -24,6 +24,7 @@ INCLUDE(CheckCCompilerFlag)
 INCLUDE(CheckCSourceCompiles)
 INCLUDE(CheckTypeSize)
 include(CheckFileOffsetBits)
+include(GNUInstallDirs)
 
 
 SET(CMAKE_ALLOW_LOOSE_LOOP_CONSTRUCTS TRUE)
@@ -44,8 +45,14 @@ OPTION(ALSOFT_HRTF_DEFS "Install HRTF definition files" ON)
 OPTION(ALSOFT_AMBDEC_PRESETS "Install AmbDec preset files" ON)
 OPTION(ALSOFT_INSTALL "Install headers and libraries" ON)
 
+if(DEFINED SHARE_INSTALL_DIR)
+    message(WARNING "SHARE_INSTALL_DIR is deprecated.  Use the variables provided by the GNUInstallDirs module instead")
+    set(CMAKE_INSTALL_DATADIR "${SHARE_INSTALL_DIR}")
+endif()
 
-set(SHARE_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/share" CACHE STRING "The share install dir")
+if(DEFINED LIB_SUFFIX)
+    message(WARNING "LIB_SUFFIX is deprecated.  Use the variables provided by the GNUInstallDirs module instead")
+endif()
 
 
 IF(NOT WIN32)
@@ -171,6 +178,23 @@ IF(CMAKE_COMPILER_IS_GNUCC)
     SET(CMAKE_REQUIRED_FLAGS "${OLD_REQUIRED_FLAGS}")
 ENDIF()
 
+# Some systems may need libatomic for C11 atomic functions to work
+SET(OLD_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES})
+SET(CMAKE_REQUIRED_LIBRARIES ${OLD_REQUIRED_LIBRARIES} atomic)
+CHECK_C_SOURCE_COMPILES("#include <stdatomic.h>
+int _Atomic foo = ATOMIC_VAR_INIT(0);
+int main()
+{
+    return atomic_fetch_add(&foo, 2);
+}"
+HAVE_LIBATOMIC)
+IF(NOT HAVE_LIBATOMIC)
+    SET(CMAKE_REQUIRED_LIBRARIES "${OLD_REQUIRED_LIBRARIES}")
+ELSE()
+    SET(EXTRA_LIBS atomic ${EXTRA_LIBS})
+ENDIF()
+UNSET(OLD_REQUIRED_LIBRARIES)
+
 # Check if we have C99 variable length arrays
 CHECK_C_SOURCE_COMPILES(
 "int main(int argc, char *argv[])
@@ -213,8 +237,10 @@ HAVE_C11_ALIGNAS)
 CHECK_C_SOURCE_COMPILES(
 "#include <stdatomic.h>
  const int _Atomic foo = ATOMIC_VAR_INIT(~0);
+ int _Atomic bar = ATOMIC_VAR_INIT(0);
  int main()
  {
+     atomic_fetch_add(&bar, 2);
      return atomic_load(&foo);
  }"
 HAVE_C11_ATOMIC)
@@ -364,6 +390,7 @@ SET(SSE_SWITCH "")
 SET(SSE2_SWITCH "")
 SET(SSE3_SWITCH "")
 SET(SSE4_1_SWITCH "")
+SET(FPU_NEON_SWITCH "")
 IF(NOT MSVC)
     CHECK_C_COMPILER_FLAG(-msse HAVE_MSSE_SWITCH)
     IF(HAVE_MSSE_SWITCH)
@@ -380,6 +407,10 @@ IF(NOT MSVC)
     CHECK_C_COMPILER_FLAG(-msse4.1 HAVE_MSSE4_1_SWITCH)
     IF(HAVE_MSSE4_1_SWITCH)
         SET(SSE4_1_SWITCH "-msse4.1")
+    ENDIF()
+    CHECK_C_COMPILER_FLAG(-mfpu=neon HAVE_MFPU_NEON_SWITCH)
+    IF(HAVE_MFPU_NEON_SWITCH)
+        SET(FPU_NEON_SWITCH "-mfpu=neon")
     ENDIF()
 ENDIF()
 
@@ -766,6 +797,10 @@ IF(HAVE_ARM_NEON_H)
     IF(ALSOFT_CPUEXT_NEON)
         SET(HAVE_NEON 1)
         SET(ALC_OBJS  ${ALC_OBJS} Alc/mixer_neon.c)
+        IF(FPU_NEON_SWITCH)
+            SET_SOURCE_FILES_PROPERTIES(Alc/mixer_neon.c PROPERTIES
+                                        COMPILE_FLAGS "${FPU_NEON_SWITCH}")
+        ENDIF()
         SET(CPU_EXTS "${CPU_EXTS}, Neon")
     ENDIF()
 ENDIF()
@@ -1112,9 +1147,9 @@ ENDIF()
 # Needed for openal.pc.in
 SET(prefix ${CMAKE_INSTALL_PREFIX})
 SET(exec_prefix "\${prefix}")
-SET(libdir "\${exec_prefix}/lib${LIB_SUFFIX}")
-SET(bindir "\${exec_prefix}/bin")
-SET(includedir "\${prefix}/include")
+SET(libdir "\${exec_prefix}/${CMAKE_INSTALL_LIBDIR}")
+SET(bindir "\${exec_prefix}/${CMAKE_INSTALL_BINDIR}")
+SET(includedir "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
 SET(PACKAGE_VERSION "${LIB_VERSION}")
 
 # End configuration
@@ -1205,9 +1240,9 @@ TARGET_LINK_LIBRARIES(${LIBNAME} common ${EXTRA_LIBS})
 IF(ALSOFT_INSTALL)
     # Add an install target here
     INSTALL(TARGETS ${LIBNAME}
-            RUNTIME DESTINATION bin
-            LIBRARY DESTINATION "lib${LIB_SUFFIX}"
-            ARCHIVE DESTINATION "lib${LIB_SUFFIX}"
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     )
     INSTALL(FILES include/AL/al.h
                   include/AL/alc.h
@@ -1215,10 +1250,10 @@ IF(ALSOFT_INSTALL)
                   include/AL/efx.h
                   include/AL/efx-creative.h
                   include/AL/efx-presets.h
-            DESTINATION include/AL
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/AL
     )
     INSTALL(FILES "${OpenAL_BINARY_DIR}/openal.pc"
-            DESTINATION "lib${LIB_SUFFIX}/pkgconfig")
+            DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
 ENDIF()
 
 
@@ -1246,7 +1281,7 @@ endif()
 # Install alsoft.conf configuration file
 IF(ALSOFT_CONFIG)
     INSTALL(FILES alsoftrc.sample
-            DESTINATION ${SHARE_INSTALL_DIR}/openal
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/openal
     )
     MESSAGE(STATUS "Installing sample configuration")
     MESSAGE(STATUS "")
@@ -1256,7 +1291,7 @@ ENDIF()
 IF(ALSOFT_HRTF_DEFS)
     INSTALL(FILES hrtf/default-44100.mhr
                   hrtf/default-48000.mhr
-            DESTINATION ${SHARE_INSTALL_DIR}/openal/hrtf
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/openal/hrtf
     )
     MESSAGE(STATUS "Installing HRTF definitions")
     MESSAGE(STATUS "")
@@ -1270,7 +1305,7 @@ IF(ALSOFT_AMBDEC_PRESETS)
                   presets/rectangle.ambdec
                   presets/square.ambdec
                   presets/presets.txt
-            DESTINATION ${SHARE_INSTALL_DIR}/openal/presets
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/openal/presets
     )
     MESSAGE(STATUS "Installing AmbDec presets")
     MESSAGE(STATUS "")
@@ -1295,9 +1330,9 @@ IF(ALSOFT_UTILS)
 
     IF(ALSOFT_INSTALL)
         INSTALL(TARGETS openal-info makehrtf bsincgen
-                RUNTIME DESTINATION bin
-                LIBRARY DESTINATION "lib${LIB_SUFFIX}"
-                ARCHIVE DESTINATION "lib${LIB_SUFFIX}"
+                RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+                LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         )
     ENDIF()
 
@@ -1318,9 +1353,9 @@ IF(ALSOFT_TESTS)
 
     IF(ALSOFT_INSTALL)
         INSTALL(TARGETS altonegen
-                RUNTIME DESTINATION bin
-                LIBRARY DESTINATION "lib${LIB_SUFFIX}"
-                ARCHIVE DESTINATION "lib${LIB_SUFFIX}"
+                RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+                LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         )
     ENDIF()
 
@@ -1376,9 +1411,9 @@ IF(ALSOFT_EXAMPLES)
 
         IF(ALSOFT_INSTALL)
             INSTALL(TARGETS alstream alreverb allatency alloopback alhrtf
-                    RUNTIME DESTINATION bin
-                    LIBRARY DESTINATION "lib${LIB_SUFFIX}"
-                    ARCHIVE DESTINATION "lib${LIB_SUFFIX}"
+                    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+                    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
             )
         ENDIF()
 
@@ -1415,9 +1450,9 @@ IF(ALSOFT_EXAMPLES)
 
             IF(ALSOFT_INSTALL)
                 INSTALL(TARGETS alffplay
-                        RUNTIME DESTINATION bin
-                        LIBRARY DESTINATION "lib${LIB_SUFFIX}"
-                        ARCHIVE DESTINATION "lib${LIB_SUFFIX}"
+                        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+                        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
                 )
             ENDIF()
             MESSAGE(STATUS "Building SDL and FFmpeg example programs")

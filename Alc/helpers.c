@@ -234,7 +234,7 @@ void FillCPUCaps(ALuint capfilter)
 #endif
 #ifdef HAVE_NEON
     FILE *file = fopen("/proc/cpuinfo", "rt");
-    if(file)
+    if(!file)
         ERR("Failed to open /proc/cpuinfo, cannot check for NEON support\n");
     else
     {
@@ -726,7 +726,7 @@ al_string GetProcPath(void)
     if(len <= 0)
     {
         free(pathname);
-        ERR("Failed to link %s: %s\n", fname, strerror(errno));
+        WARN("Failed to readlink %s: %s\n", fname, strerror(errno));
         return ret;
     }
 
